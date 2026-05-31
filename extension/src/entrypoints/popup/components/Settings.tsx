@@ -37,45 +37,45 @@ export default function Settings({ onBack, onModeChange }: Props) {
     <div className="space-y-4">
       <button
         onClick={onBack}
-        className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+        className="rounded-md px-2 py-1 text-xs font-medium text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
       >
         &larr; Back
       </button>
 
       <div>
-        <label className="block text-xs font-medium text-gray-600 mb-2">Mode</label>
-        <div className="flex gap-2">
+        <label className="mb-2 block text-xs font-medium text-zinc-700">Mode</label>
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-zinc-200 bg-zinc-100 p-1">
           <button
             onClick={() => handleModeChange("cloud")}
-            className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
+            className={`h-8 rounded-sm px-3 text-sm font-medium transition-colors ${
               mode === "cloud"
-                ? "bg-gray-900 text-white"
-                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                ? "bg-white text-zinc-950 shadow-sm"
+                : "text-zinc-500 hover:text-zinc-900"
             }`}
           >
             Cloud
           </button>
           <button
             onClick={() => handleModeChange("local")}
-            className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
+            className={`h-8 rounded-sm px-3 text-sm font-medium transition-colors ${
               mode === "local"
-                ? "bg-gray-900 text-white"
-                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                ? "bg-white text-zinc-950 shadow-sm"
+                : "text-zinc-500 hover:text-zinc-900"
             }`}
           >
             Local
           </button>
         </div>
-        <p className="text-[11px] text-gray-400 mt-1.5">
+        <p className="mt-1.5 text-[11px] leading-4 text-zinc-500">
           {mode === "cloud"
-            ? "Saves to llmwiki.app — requires sign in"
-            : "Saves to your local LLM Wiki instance — no sign in needed"}
+            ? "Saves to llmwiki.app, requires sign in"
+            : "Saves to your local LLM Wiki instance, no sign in needed"}
         </p>
       </div>
 
       {mode === "local" && (
         <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">
+          <label className="mb-1.5 block text-xs font-medium text-zinc-700">
             API URL
           </label>
           <div className="flex gap-2">
@@ -83,15 +83,16 @@ export default function Settings({ onBack, onModeChange }: Props) {
               value={localUrl}
               onChange={(e) => setLocalUrlState(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleUrlSave(); }}
-              className="flex-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm
-                         text-gray-900 shadow-sm focus:border-gray-900 focus:ring-1
-                         focus:ring-gray-900 outline-none font-mono text-xs"
+              className="h-9 min-w-0 flex-1 rounded-md border border-zinc-200 bg-white px-3
+                         font-mono text-xs text-zinc-950 shadow-sm outline-none
+                         transition-colors focus:border-zinc-400 focus:ring-2
+                         focus:ring-zinc-950/10"
               placeholder="http://localhost:8000"
             />
             <button
               onClick={handleUrlSave}
-              className="px-3 py-1.5 text-xs font-medium text-white bg-gray-900 rounded-md
-                         hover:bg-gray-800 transition-colors"
+              className="h-9 rounded-md bg-zinc-950 px-3 text-xs font-medium text-zinc-50
+                         transition-colors hover:bg-zinc-800"
             >
               Save
             </button>
@@ -100,7 +101,7 @@ export default function Settings({ onBack, onModeChange }: Props) {
       )}
 
       {saved && (
-        <p className="text-xs text-green-600">Settings saved</p>
+        <p className="text-xs text-emerald-700">Settings saved</p>
       )}
     </div>
   );

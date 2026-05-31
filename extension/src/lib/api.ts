@@ -24,10 +24,19 @@ export interface HighlightAnchor {
   suffix?: string | null;
 }
 
+export interface TextAnchor {
+  textStart: number;
+  textEnd: number;
+  textContent: string;
+  prefix?: string | null;
+  suffix?: string | null;
+}
+
 export interface Highlight {
   id: string;
   type: "text" | "pdf";
   anchor?: HighlightAnchor | null;
+  textAnchor?: TextAnchor | null;
   comment: string | null;
   color: string;
   createdAt: string;
@@ -221,6 +230,56 @@ export async function replaceHighlights(
   }
   if (!res.ok) {
     throw new Error(`Save highlights failed (${res.status}): ${res.text}`);
+  }
+  return res.data as HighlightsResponse;
+}
+
+export async function upsertHighlight(
+  apiUrl: string,
+  accessToken: string | null,
+  documentId: string,
+  highlight: Highlight,
+  expectedVersion?: number,
+): Promise<HighlightsResponse> {
+  const res = await smartFetch(
+    `${apiUrl}/v1/documents/${documentId}/highlights`,
+    {
+      method: "POST",
+      headers: jsonHeaders(accessToken),
+      body: JSON.stringify({ highlight, expectedVersion }),
+    },
+  );
+  if (res.status === 409) {
+    throw Object.assign(new Error("Version conflict"), { conflict: true });
+  }
+  if (!res.ok) {
+    throw new Error(`Save highlight failed (${res.status}): ${res.text}`);
+  }
+  return res.data as HighlightsResponse;
+}
+
+export async function deleteHighlight(
+  apiUrl: string,
+  accessToken: string | null,
+  documentId: string,
+  highlightId: string,
+  expectedVersion?: number,
+): Promise<HighlightsResponse> {
+  const params = expectedVersion === undefined
+    ? ""
+    : `?expectedVersion=${encodeURIComponent(String(expectedVersion))}`;
+  const res = await smartFetch(
+    `${apiUrl}/v1/documents/${documentId}/highlights/${encodeURIComponent(highlightId)}${params}`,
+    {
+      method: "DELETE",
+      headers: authHeaders(accessToken),
+    },
+  );
+  if (res.status === 409) {
+    throw Object.assign(new Error("Version conflict"), { conflict: true });
+  }
+  if (!res.ok) {
+    throw new Error(`Delete highlight failed (${res.status}): ${res.text}`);
   }
   return res.data as HighlightsResponse;
 }

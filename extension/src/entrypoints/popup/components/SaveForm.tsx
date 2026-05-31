@@ -1,5 +1,11 @@
 import React, { useEffect, useState } from "react";
-import { saveWebPage, savePdf, type Highlight } from "@/lib/api";
+import {
+  getDocumentByUrl,
+  saveWebPage,
+  savePdf,
+  type DocumentByUrl,
+  type Highlight,
+} from "@/lib/api";
 import KBPicker from "./KBPicker";
 import StatusFeedback, { type Status } from "./StatusFeedback";
 
@@ -44,11 +50,53 @@ export default function SaveForm({ apiUrl, accessToken }: Props) {
   const [tab, setTab] = useState<TabInfo | null>(null);
   const [title, setTitle] = useState("");
   const [knowledgeBaseId, setKnowledgeBaseId] = useState<string | null>(null);
+  const [existingDoc, setExistingDoc] = useState<DocumentByUrl | null>(null);
+  const [checkingExisting, setCheckingExisting] = useState(false);
   const [status, setStatus] = useState<Status>({ type: "idle" });
 
   useEffect(() => {
     detectCurrentPage();
   }, []);
+
+  useEffect(() => {
+    if (!tab || tab.isPdf) {
+      setExistingDoc(null);
+      setCheckingExisting(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function checkExistingDocument() {
+      if (!tab) return;
+      setCheckingExisting(true);
+      setExistingDoc(null);
+      try {
+        const doc = await getDocumentByUrl(apiUrl, accessToken, canonicalize(tab.url));
+        if (cancelled) return;
+        if (doc) {
+          setExistingDoc(doc);
+          setKnowledgeBaseId(doc.knowledge_base_id);
+          chrome.tabs.sendMessage(tab.tabId, {
+            type: "DOCUMENT_SAVED",
+            documentId: doc.id,
+          }).catch(() => {
+            // Content script may not be present on restricted pages.
+          });
+        }
+      } catch {
+        // A miss is normal for new pages. Other failures should not block saving.
+      } finally {
+        if (!cancelled) setCheckingExisting(false);
+      }
+    }
+
+    checkExistingDocument();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiUrl, accessToken, tab]);
 
   async function detectCurrentPage() {
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -143,6 +191,15 @@ export default function SaveForm({ apiUrl, accessToken }: Props) {
       // Page might be closed or content script unavailable — fine.
     }
 
+    setExistingDoc({
+      id: result.id,
+      knowledge_base_id: knowledgeBaseId,
+      title: title || tab.title,
+      path: "/webclipper/",
+      filename: "",
+      version: 1,
+      highlights,
+    });
     setStatus({ type: "success" });
   }
 
@@ -171,37 +228,39 @@ export default function SaveForm({ apiUrl, accessToken }: Props) {
   if (!tab) {
     return (
       <div className="flex items-center justify-center py-6">
-        <div className="w-5 h-5 border-2 border-gray-300 border-t-gray-900 rounded-full animate-spin" />
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-200 border-t-zinc-800" />
       </div>
     );
   }
 
   const isSaving = status.type === "saving";
-  const canSave = knowledgeBaseId && !isSaving && status.type !== "success";
+  const isAlreadySaved = !!existingDoc;
+  const canSave = knowledgeBaseId && !isSaving && !isAlreadySaved && status.type !== "success";
 
   return (
     <div className="space-y-3">
       {/* Type badge + URL */}
-      <div className="flex items-center gap-1.5">
+      <div className="flex min-w-0 items-center gap-2 rounded-md border border-zinc-200 bg-white px-2.5 py-2">
         <span
-          className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium ${
-            tab.isPdf ? "bg-red-50 text-red-700" : "bg-gray-100 text-gray-700"
+          className={`inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[11px] font-medium ${
+            tab.isPdf ? "bg-red-50 text-red-700" : "bg-zinc-100 text-zinc-700"
           }`}
         >
           {tab.isPdf ? "PDF" : "Web"}
         </span>
-        <span className="text-xs text-gray-400 truncate max-w-[320px]">{tab.url}</span>
+        <span className="min-w-0 truncate text-xs text-zinc-500">{tab.url}</span>
       </div>
 
       {/* Title */}
       <div>
-        <label className="block text-xs font-medium text-gray-600 mb-1">Title</label>
+        <label className="mb-1.5 block text-xs font-medium text-zinc-700">Title</label>
         <input
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm
-                     text-gray-900 shadow-sm focus:border-gray-900 focus:ring-1
-                     focus:ring-gray-900 outline-none"
+          className="h-9 w-full rounded-md border border-zinc-200 bg-white px-3 text-sm
+                     text-zinc-950 shadow-sm outline-none transition-colors
+                     placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-2
+                     focus:ring-zinc-950/10"
           placeholder="Page title"
         />
       </div>
@@ -218,12 +277,26 @@ export default function SaveForm({ apiUrl, accessToken }: Props) {
       <button
         onClick={handleSave}
         disabled={!canSave}
-        className="w-full py-2 px-4 rounded-md text-sm font-medium text-white
-                   bg-gray-900 hover:bg-gray-800 disabled:opacity-50
-                   disabled:cursor-not-allowed transition-colors shadow-sm"
+        className={`h-9 w-full rounded-md px-4 text-sm font-medium
+                   transition-colors focus-visible:outline-none focus-visible:ring-2
+                   focus-visible:ring-zinc-950 focus-visible:ring-offset-2
+                   disabled:cursor-not-allowed ${
+                     isAlreadySaved
+                       ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
+                       : "bg-zinc-950 text-zinc-50 shadow-sm hover:bg-zinc-800 disabled:opacity-50"
+                   }`}
       >
-        {isSaving ? "Saving..." : "Save to LLM Wiki"}
+        {isSaving ? "Saving..." : isAlreadySaved ? "Already saved" : "Save to LLM Wiki"}
       </button>
+
+      {checkingExisting && (
+        <p className="text-xs text-zinc-500">Checking saved status...</p>
+      )}
+      {isAlreadySaved && (
+        <p className="text-xs text-emerald-700">
+          This page is already in LLM Wiki.
+        </p>
+      )}
 
       <StatusFeedback status={status} />
     </div>

@@ -33,7 +33,41 @@ REMOVE_TAGS = {
     "video", "audio", "map", "object", "embed",
 }
 
-NOISE_TAGS = {"nav", "footer", "aside", "header"}
+SANITIZE_DROP_TAGS = REMOVE_TAGS | {
+    "base", "link", "meta", "template",
+}
+
+SANITIZE_GLOBAL_ATTRS = {
+    "id", "class", "title", "role", "aria-label", "aria-hidden",
+    "data-webmd-block",
+}
+
+SANITIZE_ATTRS_BY_TAG = {
+    "a": {"href", "target", "rel"},
+    "blockquote": {"cite"},
+    "button": {"disabled", "type"},
+    "col": {"span"},
+    "colgroup": {"span"},
+    "form": {"method"},
+    "img": {"src", "srcset", "alt", "width", "height", "loading"},
+    "input": {"type", "name", "value", "placeholder", "checked", "disabled"},
+    "label": {"for"},
+    "ol": {"start", "type"},
+    "option": {"value", "selected", "disabled"},
+    "select": {"name", "disabled", "multiple"},
+    "td": {"colspan", "rowspan"},
+    "textarea": {"name", "placeholder", "disabled"},
+    "th": {"colspan", "rowspan", "scope"},
+    "ul": {"type"},
+}
+
+SANITIZE_URL_ATTRS = {"href", "src", "cite"}
+SANITIZE_ALLOWED_URL_SCHEMES = {"http", "https", "mailto", "tel"}
+SANITIZE_ALLOWED_DATA_IMAGE_TYPES = {
+    "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp",
+}
+
+NOISE_TAGS = {"nav", "footer", "aside"}
 
 NOISE_CLASSES = {
     "sidebar", "navigation", "nav", "menu", "footer", "header",
@@ -67,6 +101,7 @@ class Parser:
         self._segments: List[Tuple[str, Tag]] = []
         self._suppress_tracking: bool = False
         self._block_nodes: Dict[str, List[Tag]] = {}
+        self._parsed: bool = False
         self._remove_noise()
 
     def _resolve_url(self, src: str) -> str:
@@ -93,8 +128,8 @@ class Parser:
 
         if self.content_only:
             to_remove = [
-                tag for tag in self.soup.find_all(NOISE_TAGS)
-                if tag.parent is not None
+                tag for tag in self.soup.find_all(["nav", "footer", "aside", "header"])
+                if tag.parent is not None and self._is_noise(tag)
             ]
             for tag in to_remove:
                 tag.decompose()
@@ -121,6 +156,9 @@ class Parser:
         if el.name in NOISE_TAGS:
             return True
 
+        if el.name == "header":
+            return Parser._is_noise_header(el)
+
         el_id = (el.get("id") or "").lower()
         if el_id in NOISE_IDS:
             return True
@@ -137,6 +175,37 @@ class Parser:
             return True
 
         return False
+
+    @staticmethod
+    def _is_noise_header(el: Tag) -> bool:
+        """Drop site chrome headers while preserving article headers.
+
+        News sites commonly place the article title and byline in
+        ``<article><header>...``. Treating every header as noise strips the
+        headline from web clips. Global mastheads usually carry banner/nav
+        roles or live outside article/main content.
+        """
+        role = (el.get("role") or "").lower()
+        if role in {"banner", "navigation"}:
+            return True
+
+        classes = el.get("class", [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        class_set = {cls.lower() for cls in classes}
+        el_id = (el.get("id") or "").lower()
+
+        chrome_tokens = {
+            "header", "site-header", "masthead", "topbar", "navbar",
+            "navigation", "nav", "menu",
+        }
+        if el_id in chrome_tokens or class_set.intersection(chrome_tokens):
+            return True
+
+        if el.find_parent(["article", "main"]) and el.find(["h1", "h2"]):
+            return False
+
+        return not bool(el.find(["h1", "h2"]))
 
     @staticmethod
     def _is_bold(el: Tag) -> bool:
@@ -330,13 +399,15 @@ class Parser:
             return ""
 
         abs_url = self._resolve_url(src)
-        img = Image(url=abs_url, alt=alt)
+        ref = f"IMG{len(self.images) + 1}"
+        img = Image(url=abs_url, alt=alt, ref=ref)
         self.images.append(img)
 
-        ref = f"IMG{len(self.images)}"
-        if alt:
-            return f"[{ref}: {alt}]"
-        return f"[{ref}]"
+        return f"![{self._escape_md_link_text(alt)}](llmwiki-image://{ref})"
+
+    @staticmethod
+    def _escape_md_link_text(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
     def _process_children(self, el: Tag) -> str:
         parts = []
@@ -512,7 +583,7 @@ class Parser:
 
     _URL_ATTRS = {
         "a": ["href"],
-        "img": ["src"],
+        "img": ["src", "srcset"],
         "source": ["src", "srcset"],
         "link": ["href"],
         "form": ["action"],
@@ -657,7 +728,93 @@ class Parser:
 
         await asyncio.gather(*[_download(img) for img in imgs])
 
-    def html(self) -> str:
+    @staticmethod
+    def _is_safe_url(value: str, *, allow_data_image: bool = False) -> bool:
+        value = value.strip()
+        if not value:
+            return False
+        if re.search(r"[\x00-\x1f\x7f]", value):
+            return False
+        lowered = value.lower()
+        if lowered.startswith(("#", "/", "./", "../")):
+            return True
+        if lowered.startswith("//"):
+            return True
+        if ":" not in lowered.split("/", 1)[0]:
+            return True
+        scheme = lowered.split(":", 1)[0]
+        if scheme in SANITIZE_ALLOWED_URL_SCHEMES:
+            return True
+        if allow_data_image and lowered.startswith("data:"):
+            header = lowered[5:].split(",", 1)[0].split(";", 1)[0].strip()
+            return header in SANITIZE_ALLOWED_DATA_IMAGE_TYPES
+        return False
+
+    @classmethod
+    def _sanitize_srcset(cls, value: str) -> str | None:
+        if "data:" in value.lower():
+            return None
+
+        entries: List[str] = []
+        for raw_entry in value.split(","):
+            entry = raw_entry.strip()
+            if not entry:
+                continue
+            tokens = entry.split()
+            if not tokens:
+                continue
+            if cls._is_safe_url(tokens[0], allow_data_image=False):
+                entries.append(" ".join(tokens))
+        return ", ".join(entries) if entries else None
+
+    def _sanitize_dom(self) -> None:
+        for tag_name in SANITIZE_DROP_TAGS:
+            for tag in self.soup.find_all(tag_name):
+                tag.decompose()
+
+        for tag in self.soup.find_all(True):
+            allowed_attrs = SANITIZE_GLOBAL_ATTRS | SANITIZE_ATTRS_BY_TAG.get(tag.name, set())
+            for attr in list(tag.attrs.keys()):
+                attr_l = attr.lower()
+                value = tag.get(attr)
+
+                if attr_l.startswith("on") or attr_l == "style" or attr_l == "srcdoc":
+                    del tag.attrs[attr]
+                    continue
+
+                if attr_l not in allowed_attrs:
+                    del tag.attrs[attr]
+                    continue
+
+                if attr_l in SANITIZE_URL_ATTRS:
+                    raw = " ".join(value) if isinstance(value, list) else str(value)
+                    allow_data = tag.name == "img" and attr_l == "src"
+                    if not self._is_safe_url(raw, allow_data_image=allow_data):
+                        del tag.attrs[attr]
+                    continue
+
+                if tag.name == "img" and attr_l == "srcset":
+                    raw = " ".join(value) if isinstance(value, list) else str(value)
+                    clean = self._sanitize_srcset(raw)
+                    if clean:
+                        tag.attrs[attr] = clean
+                    else:
+                        del tag.attrs[attr]
+                    continue
+
+                if attr_l == "target" and str(value).lower() != "_blank":
+                    del tag.attrs[attr]
+                    continue
+
+                if tag.name == "a" and attr_l == "rel":
+                    tag.attrs[attr] = "noopener noreferrer"
+
+            if tag.name == "a" and tag.get("target") == "_blank":
+                tag["rel"] = "noopener noreferrer"
+
+    def html(self, sanitize: bool = False) -> str:
+        if sanitize:
+            self._sanitize_dom()
         return str(self.soup)
 
     def _normalize_output(self, text: str) -> str:
@@ -957,6 +1114,9 @@ class Parser:
         return results
 
     def parse(self, highlights: Optional[List[Dict]] = None) -> ParseResult:
+        if self._parsed:
+            raise RuntimeError("Parser instances are single-use; create a new Parser to parse again.")
+        self._parsed = True
         self.images = []
         self.forms = FormExtractor()
         self._segments = []

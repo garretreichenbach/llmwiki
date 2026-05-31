@@ -51,7 +51,7 @@ function resolveOne(h: Highlight, canonical: CanonicalPlaintext): DecorationRang
   const to = canonical.offsetToPos(textEnd, 'left')
   if (from === null || to === null || from >= to) return null
 
-  return { id: h.id, from, to }
+  return { id: h.id, from, to, comment: h.comment }
 }
 
 export function decorationsFromHighlights(

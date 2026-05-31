@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import { AppShell } from '@/components/layout/AppShell'
 import { AuthProvider } from '@/components/auth/AuthProvider'
+import { withAuthTimeout } from '@/lib/auth-errors'
 
 const isLocal = process.env.NEXT_PUBLIC_MODE === 'local'
 
@@ -26,20 +27,37 @@ function HostedDashboard({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    import('@/lib/supabase/client').then(({ createClient }) => {
+    let cancelled = false
+    const returnTo = pathname !== '/wikis' ? `?returnTo=${encodeURIComponent(pathname)}` : ''
+
+    const bounceToLogin = async () => {
+      try {
+        const { createClient } = await import('@/lib/supabase/client')
+        await createClient().auth.signOut()
+      } catch { /* signOut best-effort */ }
+      if (!cancelled) router.replace(`/login${returnTo}`)
+    }
+
+    import('@/lib/supabase/client').then(async ({ createClient }) => {
+      if (cancelled) return
       const supabase = createClient()
-      supabase.auth.getUser().then(({ data: { user: authUser } }) => {
+      try {
+        const { data: { user: authUser } } = await withAuthTimeout(supabase.auth.getUser())
+        if (cancelled) return
         if (!authUser) {
-          const returnTo = pathname !== '/wikis' ? `?returnTo=${encodeURIComponent(pathname)}` : ''
-          router.replace(`/login${returnTo}`)
+          await bounceToLogin()
           return
         }
         setUser({ id: authUser.id, email: authUser.email! })
         setLoading(false)
-      })
+      } catch {
+        await bounceToLogin()
+      }
     }).catch(() => {
-      router.replace('/login')
+      bounceToLogin()
     })
+
+    return () => { cancelled = true }
   }, [router, pathname])
 
   if (loading) return null

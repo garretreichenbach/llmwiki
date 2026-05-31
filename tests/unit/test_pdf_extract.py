@@ -1,6 +1,7 @@
 """Unit tests for the PDF extraction module (opendataloader-pdf integration)."""
 
 from services.pdf_extract import _element_to_markdown, _elements_to_pages, extract_pdf
+from services.extracted_assets import build_pdf_image_assets
 
 
 class TestElementToMarkdown:
@@ -143,3 +144,27 @@ class TestElementsToPages:
         assert pages[0][0] == 1
         assert pages[0][1] == "Only page 1"
         assert all(pages[i][1] == "" for i in range(1, 5))
+
+
+def test_build_pdf_image_assets_uses_hidden_relative_asset_paths():
+    pages = [
+        (1, "Page one", [{"id": "img_1_0.png", "bytes": b"png", "format": "png"}]),
+        (2, "Page two", [{"id": "img_2_0.jpeg", "bytes": b"jpg", "format": "jpeg"}]),
+    ]
+
+    assets, page_elements = build_pdf_image_assets(
+        "doc-a",
+        "Quarterly Report.pdf",
+        "/sources/",
+        pages,
+    )
+
+    assert [asset.filename for asset in assets] == [
+        "page-001-image-01.png",
+        "page-002-image-01.jpg",
+    ]
+    assert assets[0].path == "/sources/quarterly-report.assets/"
+    assert assets[0].src == "quarterly-report.assets/page-001-image-01.png"
+    assert assets[0].metadata()["hidden"] is True
+    assert assets[0].metadata()["kind"] == "pdf_image"
+    assert page_elements[1]["images"][0]["src"] == "./quarterly-report.assets/page-001-image-01.png"

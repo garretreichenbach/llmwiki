@@ -11,9 +11,11 @@ import {
 } from "@/lib/highlights";
 import type { Highlight } from "@/lib/api";
 import {
+  deleteHighlight,
   getDocumentByUrl,
   getHighlights,
   replaceHighlights,
+  upsertHighlight,
 } from "@/lib/api";
 import { getApiUrl } from "@/lib/settings";
 
@@ -35,17 +37,42 @@ function injectStyle(): void {
   style.id = STYLE_ID;
   style.textContent = `
     mark.${HIGHLIGHT_CLASS} {
+      position: relative;
       background-color: rgba(255, 224, 84, 0.65);
       color: inherit;
       padding: 0 1px;
       border-radius: 2px;
       cursor: pointer;
+      transition: background-color 120ms ease, box-shadow 120ms ease;
+    }
+    mark.${HIGHLIGHT_CLASS}:hover {
+      background-color: rgba(255, 213, 43, 0.78);
+      box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.24);
     }
     mark.${HIGHLIGHT_CLASS}[data-llmwiki-comment="1"]::after {
       content: "💬";
       font-size: 0.7em;
       margin-left: 2px;
       opacity: 0.7;
+    }
+    mark.${HIGHLIGHT_CLASS}[data-llmwiki-comment-text]:hover::before {
+      content: attr(data-llmwiki-comment-text);
+      position: absolute;
+      left: 0;
+      bottom: calc(100% + 8px);
+      z-index: 2147483647;
+      box-sizing: border-box;
+      width: max-content;
+      max-width: min(280px, 70vw);
+      white-space: pre-wrap;
+      background: #111827;
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      padding: 8px 10px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.24);
+      font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      pointer-events: none;
     }
     .llmwiki-pill {
       position: absolute;
@@ -131,6 +158,23 @@ function injectStyle(): void {
       background: transparent;
       color: #b00020;
     }
+    .llmwiki-toast {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 2147483647;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      max-width: 280px;
+      border: 1px solid #bbf7d0;
+      border-radius: 8px;
+      background: #ecfdf5;
+      color: #047857;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+      padding: 9px 11px;
+      font: 600 13px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
   `;
   document.documentElement.appendChild(style);
 }
@@ -182,6 +226,7 @@ class HighlightController {
   private pill: HTMLElement | null = null;
   private popover: HTMLElement | null = null;
   private saveTimer: number | null = null;
+  private toastTimer: number | null = null;
   private isSaving = false;
 
   constructor() {
@@ -195,11 +240,16 @@ class HighlightController {
     chrome.runtime.onMessage.addListener(this.onRuntimeMessage);
   }
 
+  private async ensureSession(): Promise<string | null> {
+    const session = await chrome.runtime.sendMessage({ type: "GET_SESSION" });
+    this.accessToken = session?.accessToken ?? null;
+    return this.accessToken;
+  }
+
   private async bootstrap() {
     try {
       this.apiUrl = await getApiUrl();
-      const session = await chrome.runtime.sendMessage({ type: "GET_SESSION" });
-      this.accessToken = session?.accessToken ?? null;
+      await this.ensureSession();
       // No token → user hasn't signed in. Highlight UI still works locally;
       // network sync starts once they sign in via the popup. Don't call the
       // API and don't log noise on every page load.
@@ -232,6 +282,7 @@ class HighlightController {
   private async refreshAfterSave(documentId: string) {
     if (!this.apiUrl) return;
     this.documentId = documentId;
+    await this.ensureSession();
     try {
       const fresh = await getHighlights(this.apiUrl, this.accessToken, documentId);
       this.version = fresh.version;
@@ -352,6 +403,7 @@ class HighlightController {
     // pass can attempt text-scan resolution into a single text node.
     this.highlights.push(highlight);
     window.getSelection()?.removeAllRanges();
+    this.persistHighlight(highlight);
     if (withNote && wrapped) {
       const mark = findMark(highlight.id);
       if (mark) this.openPopoverForExisting(highlight.id, mark);
@@ -360,7 +412,6 @@ class HighlightController {
       // last range bounding rect via a transient anchor element.
       this.openPopoverAtRect(highlight.id, range.getBoundingClientRect());
     }
-    this.scheduleSave();
   }
 
   private openPopoverAtRect(id: string, rect: DOMRect) {
@@ -388,7 +439,8 @@ class HighlightController {
       const value = textarea.value.trim() || null;
       highlight.comment = value;
       this.removePopover();
-      this.scheduleSave();
+      this.syncCommentMarkers(highlight);
+      this.persistHighlight(highlight, "Comment saved");
     };
     actions.appendChild(cancel);
     actions.appendChild(save);
@@ -438,9 +490,16 @@ class HighlightController {
       // the comment indicator in sync across all of them.
       for (const m of findAllMarks(highlight.id)) {
         m.toggleAttribute("data-llmwiki-comment", !!value);
+        if (value) {
+          m.setAttribute("data-llmwiki-comment-text", value);
+          m.setAttribute("title", value);
+        } else {
+          m.removeAttribute("data-llmwiki-comment-text");
+          m.removeAttribute("title");
+        }
       }
       this.removePopover();
-      this.scheduleSave();
+      this.persistHighlight(highlight, "Comment saved");
     };
     actions.appendChild(cancel);
     actions.appendChild(save);
@@ -460,7 +519,85 @@ class HighlightController {
   private deleteHighlight(id: string) {
     unwrapById(id);
     this.highlights = this.highlights.filter((h) => h.id !== id);
-    this.scheduleSave();
+    this.persistDelete(id);
+  }
+
+  private mergeServerHighlights(result: { version: number; highlights?: Highlight[] }) {
+    this.version = result.version;
+    if (!result.highlights) return;
+    const localById = new Map(this.highlights.map((h) => [h.id, h]));
+    for (const h of result.highlights) {
+      localById.set(h.id, h);
+    }
+    this.highlights = Array.from(localById.values());
+  }
+
+  private syncCommentMarkers(highlight: Highlight) {
+    const comment = highlight.comment?.trim() || null;
+    for (const mark of findAllMarks(highlight.id)) {
+      mark.toggleAttribute("data-llmwiki-comment", !!comment);
+      if (comment) {
+        mark.setAttribute("data-llmwiki-comment-text", comment);
+        mark.setAttribute("title", comment);
+      } else {
+        mark.removeAttribute("data-llmwiki-comment-text");
+        mark.removeAttribute("title");
+      }
+    }
+  }
+
+  private showToast(message: string) {
+    const existing = document.querySelector(".llmwiki-toast");
+    if (existing?.parentNode) existing.parentNode.removeChild(existing);
+    if (this.toastTimer) window.clearTimeout(this.toastTimer);
+
+    const toast = document.createElement("div");
+    toast.className = "llmwiki-toast";
+    toast.textContent = message;
+    document.body.appendChild(toast);
+
+    this.toastTimer = window.setTimeout(() => {
+      if (toast.parentNode) toast.parentNode.removeChild(toast);
+      this.toastTimer = null;
+    }, 1800);
+  }
+
+  private async persistHighlight(highlight: Highlight, successMessage?: string) {
+    if (!this.documentId || !this.apiUrl) {
+      if (successMessage) this.showToast("Comment added");
+      return;
+    }
+    try {
+      await this.ensureSession();
+      const result = await upsertHighlight(
+        this.apiUrl,
+        this.accessToken,
+        this.documentId,
+        highlight,
+      );
+      this.mergeServerHighlights(result);
+      if (successMessage) this.showToast(successMessage);
+    } catch (err) {
+      console.warn("[llmwiki] save highlight failed:", err);
+      this.scheduleSave();
+    }
+  }
+
+  private async persistDelete(id: string) {
+    if (!this.documentId || !this.apiUrl) return;
+    try {
+      await this.ensureSession();
+      const result = await deleteHighlight(
+        this.apiUrl,
+        this.accessToken,
+        this.documentId,
+        id,
+      );
+      this.version = result.version;
+    } catch (err) {
+      console.warn("[llmwiki] delete highlight failed:", err);
+      this.scheduleSave();
+    }
   }
 
   private scheduleSave() {

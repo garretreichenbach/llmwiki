@@ -202,7 +202,12 @@ export function FilesGrid({
 
   // Source docs only (exclude wiki)
   const sourceDocs = React.useMemo(
-    () => documents.filter((d) => !d.path.startsWith('/wiki/') && !d.archived),
+    () => documents.filter((d) => (
+      !d.path.startsWith('/wiki/') &&
+      !d.archived &&
+      d.metadata?.hidden !== true &&
+      d.metadata?.asset !== true
+    )),
     [documents],
   )
 

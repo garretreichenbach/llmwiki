@@ -1,6 +1,6 @@
 """Unit tests for route helpers and utilities."""
 
-from services.types import parse_frontmatter
+from services.parsers import parse_frontmatter
 from services.hosted import _slugify
 
 

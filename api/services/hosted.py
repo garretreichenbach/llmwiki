@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
+from typing import Any
 from datetime import datetime
 
 import asyncpg
@@ -11,8 +13,9 @@ from fastapi import HTTPException
 
 from config import settings
 from services.chunker import chunk_text, store_chunks
+from services.webclip_assets import materialize_webclip_assets
 from .base import UserService, KBService, DocumentService, PublicWikiService, ServiceFactory
-from .types import parse_frontmatter, title_from_filename, extract_tags
+from .parsers import parse_frontmatter, title_from_filename, extract_tags
 
 
 class HostedUserService(UserService):
@@ -63,7 +66,7 @@ class HostedUserService(UserService):
 _KB_LIST_QUERY = (
     "SELECT kb.id, kb.user_id, kb.name, kb.slug, kb.description, "
     "kb.created_at, kb.updated_at, "
-    "(SELECT COUNT(*) FROM documents d WHERE d.knowledge_base_id = kb.id AND d.path NOT LIKE '/wiki/%%' AND NOT d.archived) AS source_count, "
+    "(SELECT COUNT(*) FROM documents d WHERE d.knowledge_base_id = kb.id AND d.path NOT LIKE '/wiki/%%' AND NOT d.archived AND COALESCE((d.metadata->>'hidden')::boolean, false) = false) AS source_count, "
     "(SELECT COUNT(*) FROM documents d WHERE d.knowledge_base_id = kb.id AND d.path LIKE '/wiki/%%' AND NOT d.archived) AS wiki_page_count "
     "FROM knowledge_bases kb"
 )
@@ -344,33 +347,82 @@ class HostedDocumentService(DocumentService):
 
         parser = Parser(html, url=url, content_only=True)
         result = parser.parse(highlights=highlights or [])
-        markdown = result.content
 
-        filename = self._slugify_filename(title, "html")
-        filename = await self._dedupe_filename(kb_id, "/webclipper/", filename, "html")
+        filename = self._slugify_filename(title, "md")
+        filename = await self._dedupe_filename(kb_id, "/webclipper/", filename, "md")
+        stem = filename.rsplit(".", 1)[0]
+        markdown, assets = await materialize_webclip_assets(
+            result.content,
+            result.images,
+            f"{stem}.assets",
+        )
+        markdown_size = len((markdown or "").encode("utf-8"))
+        file_size = markdown_size + sum(len(asset.data) for asset in assets)
+        # Best-effort fast-fail for obvious quota errors. The in-transaction
+        # check below runs under the advisory lock and is authoritative.
+        await self._check_storage_available(file_size)
 
         enriched = self._merge_text_anchors(highlights or [], result.highlights)
         highlights_json = json.dumps(enriched)
+        parent_doc_id = str(uuid.uuid4())
+        for asset in assets:
+            asset.document_id = str(uuid.uuid4())
+
+        parent_metadata = {
+            "source_url": url,
+            "clip_kind": "web",
+            "assets": [asset.metadata() for asset in assets],
+        }
+
+        if self.s3:
+            for asset in assets:
+                await self.s3.upload_bytes(
+                    f"{self.user_id}/{asset.document_id}/source.{asset.file_type}",
+                    asset.data,
+                    asset.content_type,
+                )
 
         conn = await self.pool.acquire()
         try:
             async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", self.user_id)
+                await self._check_storage_available(file_size, conn=conn)
                 row = await conn.fetchrow(
-                    f"INSERT INTO documents (knowledge_base_id, user_id, filename, path, title, "
-                    f"file_type, status, content, tags, metadata, highlights) "
-                    f"VALUES ($1, $2, $3, '/webclipper/', $4, 'html', 'ready', $5, $6, $7, $8::jsonb) "
+                    f"INSERT INTO documents (id, knowledge_base_id, user_id, filename, path, title, "
+                    f"file_type, file_size, status, content, tags, metadata, highlights) "
+                    f"VALUES ($1, $2, $3, $4, '/webclipper/', $5, 'md', $6, 'ready', $7, $8, $9, $10::jsonb) "
                     f"RETURNING {_DOC_COLUMNS}",
-                    kb_id, self.user_id, filename, title, markdown,
-                    [], json.dumps({"source_url": url}), highlights_json,
+                    parent_doc_id, kb_id, self.user_id, filename, title, markdown_size, markdown,
+                    [], json.dumps(parent_metadata), highlights_json,
                 )
+                for asset in assets:
+                    await conn.execute(
+                        "INSERT INTO documents (id, knowledge_base_id, user_id, filename, path, title, "
+                        "file_type, file_size, status, content, tags, metadata) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ready', NULL, $9, $10::jsonb)",
+                        asset.document_id,
+                        kb_id,
+                        self.user_id,
+                        asset.filename,
+                        f"/webclipper/{stem}.assets/",
+                        asset.filename,
+                        asset.file_type,
+                        len(asset.data),
+                        [],
+                        json.dumps({
+                            "asset": True,
+                            "hidden": True,
+                            "parent_document_id": parent_doc_id,
+                            "source_url": url,
+                            **asset.metadata(),
+                        }),
+                    )
                 if markdown:
                     chunks = chunk_text(markdown)
-                    await store_chunks(conn, str(row["id"]), self.user_id, str(kb_id), chunks)
+                    if chunks:
+                        await store_chunks(conn, str(row["id"]), self.user_id, str(kb_id), chunks)
         finally:
             await self.pool.release(conn)
-
-        if self.s3:
-            await self._store_tagged_html(str(row["id"]), parser)
 
         return dict(row)
 
@@ -589,7 +641,8 @@ class HostedDocumentService(DocumentService):
 
     @staticmethod
     def _slugify_filename(title: str, ext: str) -> str:
-        slug = re.sub(r"[^\w\s\-.]", "", title.lower().replace(" ", "-"))[:80]
+        slug = re.sub(r"[^\w\s\-.]", "", title.lower().replace(" ", "-"))[:80].strip("-._")
+        slug = slug or "web-clip"
         return f"{slug}.{ext}"
 
     async def _dedupe_filename(self, kb_id: str, path: str, filename: str, ext: str) -> str:
@@ -612,17 +665,27 @@ class HostedDocumentService(DocumentService):
                 return candidate
         return filename
 
-    async def _store_tagged_html(self, doc_id: str, parser) -> None:
-        try:
-            await parser.embed_images()
-            tagged = parser.html()
-            await self.s3.upload_bytes(
-                f"{self.user_id}/{doc_id}/tagged.html",
-                tagged.encode("utf-8"),
-                "text/html",
+    async def _check_storage_available(self, new_bytes: int, conn: Any | None = None) -> None:
+        query = (
+            "SELECT COALESCE(SUM(file_size), 0) FROM documents "
+            "WHERE user_id = $1"
+        )
+        limit_query = "SELECT storage_limit_bytes FROM users WHERE id = $1"
+        db = conn or self.pool
+        limits = await db.fetchrow(limit_query, self.user_id)
+        storage_limit = (
+            limits["storage_limit_bytes"]
+            if limits else settings.QUOTA_MAX_STORAGE_BYTES
+        )
+        current_bytes = await db.fetchval(query, self.user_id)
+        current_bytes = current_bytes or 0
+        if current_bytes + new_bytes > storage_limit:
+            used_mb = current_bytes / (1024 * 1024)
+            max_mb = storage_limit / (1024 * 1024)
+            raise HTTPException(
+                status_code=413,
+                detail=f"Storage quota exceeded. Using {used_mb:.0f} MB of {max_mb:.0f} MB.",
             )
-        except Exception:
-            pass
 
     async def update_content(self, doc_id: str, content: str) -> dict | None:
         row = await self.pool.fetchrow(

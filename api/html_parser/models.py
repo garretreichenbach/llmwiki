@@ -17,6 +17,7 @@ class Element:
 class Image:
     url: str
     alt: str = ""
+    ref: str = ""
 
 
 @dataclass

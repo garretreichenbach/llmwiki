@@ -3,11 +3,15 @@ import { apiFetch } from '@/lib/api'
 import { useUserStore } from './useUserStore'
 import type { KnowledgeBase } from '@/lib/types'
 
+type FetchKBsOptions = {
+  throwOnError?: boolean
+}
+
 type KBState = {
   knowledgeBases: KnowledgeBase[]
   loading: boolean
   error: string | null
-  fetchKBs: () => Promise<KnowledgeBase[]>
+  fetchKBs: (options?: FetchKBsOptions) => Promise<KnowledgeBase[]>
   createKB: (name: string, description?: string) => Promise<KnowledgeBase>
   deleteKB: (id: string) => Promise<void>
   renameKB: (id: string, name: string) => Promise<void>
@@ -24,7 +28,7 @@ export const useKBStore = create<KBState>((set, get) => ({
   loading: true,
   error: null,
 
-  fetchKBs: async () => {
+  fetchKBs: async (options) => {
     set({ loading: true, error: null })
     try {
       const token = getToken()
@@ -33,6 +37,7 @@ export const useKBStore = create<KBState>((set, get) => ({
       return data
     } catch (err) {
       set({ error: (err as Error).message, loading: false })
+      if (options?.throwOnError) throw err
       return []
     }
   },

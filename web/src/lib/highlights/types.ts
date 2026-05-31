@@ -57,4 +57,5 @@ export interface DecorationRange {
   id: string
   from: number
   to: number
+  comment?: string | null
 }

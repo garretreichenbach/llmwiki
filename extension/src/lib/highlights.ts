@@ -366,8 +366,12 @@ export function applyHighlights(highlights: Highlight[]): { applied: number; fai
       }
       mark = findMark(h.id);
     }
-    if (mark && h.comment) {
-      mark.setAttribute("data-llmwiki-comment", "1");
+    if (h.comment) {
+      for (const m of findAllMarks(h.id)) {
+        m.setAttribute("data-llmwiki-comment", "1");
+        m.setAttribute("data-llmwiki-comment-text", h.comment);
+        m.setAttribute("title", h.comment);
+      }
     }
     applied++;
   }

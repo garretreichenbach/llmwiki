@@ -16,6 +16,9 @@ from pathlib import Path
 import aiosqlite
 
 from config import settings
+from domain.watcher import mark_written
+from infra.db.sqlite import SQLiteDocumentRepository
+from services.extracted_assets import build_pdf_image_assets
 
 logger = logging.getLogger(__name__)
 
@@ -107,22 +110,51 @@ async def _store_chunks(db: aiosqlite.Connection, doc_id: str, chunks: list) -> 
 
 # ── PDF extraction ────────────────────────────────────────────────────────
 
-def _save_local_images(
-    doc_id: str, workspace: Path,
+async def _save_local_images(
+    db: aiosqlite.Connection, doc_id: str, workspace: Path,
     pages_with_images: list[tuple[int, str, list[dict]]],
 ) -> dict[int, dict]:
-    """Save extracted images to the local cache and return per-page elements metadata."""
-    page_elements: dict[int, dict] = {}
-    for page_num, _, images in pages_with_images:
-        if not images:
-            continue
-        img_dir = workspace / ".llmwiki" / "cache" / "local" / doc_id / "images"
-        img_dir.mkdir(parents=True, exist_ok=True)
-        page_imgs = []
-        for img in images:
-            (img_dir / img["id"]).write_bytes(img["bytes"])
-            page_imgs.append({"id": img["id"]})
-        page_elements[page_num] = {"images": page_imgs}
+    """Save extracted images as hidden sibling assets and return page metadata."""
+    repo = SQLiteDocumentRepository(db)
+    doc = await repo.get(doc_id)
+    if not doc:
+        return {}
+
+    assets, page_elements = build_pdf_image_assets(
+        doc_id,
+        doc["filename"],
+        doc["path"],
+        pages_with_images,
+    )
+    if not assets:
+        return {}
+
+    await db.execute(
+        "DELETE FROM documents WHERE source_kind = 'asset' AND metadata LIKE ?",
+        (f'%"parent_document_id": "{doc_id}"%',),
+    )
+    await db.commit()
+
+    asset_metadata = []
+    for asset in assets:
+        relative_asset = (asset.path.rstrip("/") + "/" + asset.filename).lstrip("/")
+        local_asset = workspace / relative_asset
+        local_asset.parent.mkdir(parents=True, exist_ok=True)
+        mark_written(str(local_asset))
+        local_asset.write_bytes(asset.data)
+        await repo.create_asset(
+            asset.document_id,
+            doc["user_id"],
+            asset.filename,
+            asset.path,
+            asset.filename,
+            asset.file_type,
+            len(asset.data),
+            asset.metadata(),
+        )
+        asset_metadata.append(asset.metadata())
+
+    await repo.set_metadata_field(doc_id, "assets", asset_metadata)
     return page_elements
 
 
@@ -163,7 +195,7 @@ async def _process_pdf(db: aiosqlite.Connection, doc_id: str, file_path: Path, w
         await _process_pdf_mistral(db, doc_id, file_path, workspace)
     else:
         pages_with_images = await asyncio.to_thread(extract_pdf, str(file_path))
-        page_elements = _save_local_images(doc_id, workspace, pages_with_images)
+        page_elements = await _save_local_images(db, doc_id, workspace, pages_with_images)
         page_contents = [(num, md) for num, md, _ in pages_with_images]
         await _store_page_contents(db, doc_id, page_contents, "opendataloader", page_elements)
 
@@ -204,7 +236,7 @@ async def _process_office(db: aiosqlite.Connection, doc_id: str, file_path: Path
         shutil.copy2(converted_pdf, cache_dir / "converted.pdf")
 
         pages_with_images = await asyncio.to_thread(extract_pdf, str(converted_pdf))
-        page_elements = _save_local_images(doc_id, workspace, pages_with_images)
+        page_elements = await _save_local_images(db, doc_id, workspace, pages_with_images)
         page_contents = [(num, md) for num, md, _ in pages_with_images]
         await _store_page_contents(db, doc_id, page_contents, "libreoffice+opendataloader", page_elements)
 

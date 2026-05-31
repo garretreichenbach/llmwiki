@@ -13,11 +13,23 @@ import { decorationsFromHighlights } from '@/lib/highlights/applyHighlights'
 import { highlightPluginKey } from '@/lib/highlights/decorationPlugin'
 import { sanitizeUrl } from '@/components/editor/PropertyEditors'
 import type { Highlight, HighlightsResponse } from '@/lib/highlights/types'
+import type { Document } from '@/lib/types'
 
 interface ContentResponse {
   id: string
   content: string
   version: number
+}
+
+interface UrlResponse {
+  url: string
+}
+
+interface WebclipAssetMetadata {
+  src?: string
+  path?: string
+  filename?: string
+  document_id?: string
 }
 
 interface Props {
@@ -30,11 +42,14 @@ export default function MarkdownClipViewer({ documentId, className }: Props) {
   const [markdown, setMarkdown] = React.useState<string | null>(null)
   const [highlights, setHighlights] = React.useState<Highlight[] | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const imageUrlsRef = React.useRef<Record<string, string>>({})
 
   const editor = useEditor({
     immediatelyRender: false,
     editable: false,
-    extensions: createMarkdownExtensions(),
+    extensions: createMarkdownExtensions({
+      imageSrcResolver: (src) => imageUrlsRef.current[normalizeImageSrc(src)] ?? src,
+    }),
     editorProps: {
       attributes: {
         class:
@@ -62,28 +77,25 @@ export default function MarkdownClipViewer({ documentId, className }: Props) {
     setError(null)
     setMarkdown(null)
     setHighlights(null)
+    imageUrlsRef.current = {}
 
-    const loadContent = apiFetch<ContentResponse>(
-      `/v1/documents/${documentId}/content`,
-      token,
-    ).then((res) => {
-      if (!cancelled) setMarkdown(res.content ?? '')
-    })
-
-    const loadHighlights = apiFetch<HighlightsResponse>(
-      `/v1/documents/${documentId}/highlights`,
-      token,
-    )
-      .then((res) => {
-        if (!cancelled) setHighlights(res.highlights ?? [])
+    Promise.all([
+      apiFetch<Document>(`/v1/documents/${documentId}`, token),
+      apiFetch<ContentResponse>(`/v1/documents/${documentId}/content`, token),
+      apiFetch<HighlightsResponse>(`/v1/documents/${documentId}/highlights`, token).catch(
+        () => ({ id: documentId, version: 0, highlights: [] }),
+      ),
+    ])
+      .then(async ([doc, content, highlightResponse]) => {
+        const imageUrls = await resolveWebclipAssetUrls(doc, token)
+        if (cancelled) return
+        imageUrlsRef.current = imageUrls
+        setMarkdown(content.content ?? '')
+        setHighlights(highlightResponse.highlights ?? [])
       })
-      .catch(() => {
-        if (!cancelled) setHighlights([])
+      .catch((err) => {
+        if (!cancelled) setError(err?.message ?? 'Failed to load document')
       })
-
-    Promise.all([loadContent, loadHighlights]).catch((err) => {
-      if (!cancelled) setError(err?.message ?? 'Failed to load document')
-    })
 
     return () => {
       cancelled = true
@@ -136,4 +148,38 @@ export default function MarkdownClipViewer({ documentId, className }: Props) {
       </div>
     </div>
   )
+}
+
+function normalizeImageSrc(src: string): string {
+  return src.trim().replace(/^\.?\//, '')
+}
+
+async function resolveWebclipAssetUrls(doc: Document, token: string): Promise<Record<string, string>> {
+  const metadata = doc.metadata ?? {}
+  const assets = Array.isArray(metadata.assets)
+    ? (metadata.assets as WebclipAssetMetadata[])
+    : []
+  if (!assets.length) return {}
+
+  const pairs = await Promise.all(
+    assets.map(async (asset) => {
+      if (!asset.document_id) return null
+      try {
+        const res = await apiFetch<UrlResponse>(`/v1/documents/${asset.document_id}/url`, token)
+        const keys = [asset.src, asset.path, asset.filename].filter(Boolean) as string[]
+        return { keys, url: res.url }
+      } catch {
+        return null
+      }
+    }),
+  )
+
+  const urls: Record<string, string> = {}
+  for (const pair of pairs) {
+    if (!pair) continue
+    for (const key of pair.keys) {
+      urls[normalizeImageSrc(key)] = pair.url
+    }
+  }
+  return urls
 }

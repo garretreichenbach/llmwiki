@@ -3,9 +3,14 @@
 import * as React from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import { useUserStore, useKBStore } from '@/stores'
-import { apiFetch } from '@/lib/api'
+import { apiFetch, isApiError } from '@/lib/api'
+import { withAuthTimeout } from '@/lib/auth-errors'
 
 const isLocal = process.env.NEXT_PUBLIC_MODE === 'local'
+
+function isAuthFailure(err: unknown): boolean {
+  return isApiError(err) && (err.status === 401 || err.status === 403)
+}
 
 interface AuthProviderProps {
   userId: string
@@ -22,12 +27,8 @@ export function AuthProvider({ userId, email, children }: AuthProviderProps) {
   const signOut = useUserStore((s) => s.signOut)
   const onboarded = useUserStore((s) => s.onboarded)
   const fetchKBs = useKBStore((s) => s.fetchKBs)
-  const initialized = React.useRef(false)
 
   React.useEffect(() => {
-    if (initialized.current) return
-    initialized.current = true
-
     if (isLocal) {
       setUser({ id: userId, email })
       setAccessToken('local')
@@ -42,38 +43,54 @@ export function AuthProvider({ userId, email, children }: AuthProviderProps) {
     import('@/lib/supabase/client').then(({ createClient }) => {
       if (cancelled) return
       const supabase = createClient()
-      supabase.auth.getUser().then(async ({ data: { user: authUser } }) => {
-        if (cancelled) return
-        if (!authUser) {
-          signOut()
-          useKBStore.setState({ knowledgeBases: [], loading: false, error: null })
-          router.replace('/login')
-          return
-        }
-        const { data: { session } } = await supabase.auth.getSession()
-        if (cancelled) return
-        if (!session) {
-          signOut()
-          useKBStore.setState({ knowledgeBases: [], loading: false, error: null })
-          router.replace('/login')
-          return
-        }
-        setUser({ id: userId, email })
-        setAccessToken(session.access_token)
-        fetchKBs()
 
+      const bounceToLogin = async () => {
+        try { await supabase.auth.signOut() } catch { /* best-effort */ }
+        signOut()
+        useKBStore.setState({ knowledgeBases: [], loading: false, error: null })
+        if (!cancelled) router.replace('/login')
+      }
+
+      ;(async () => {
         try {
-          const me = await apiFetch<{ onboarded: boolean }>('/v1/me', session.access_token)
+          const { data: { user: authUser } } = await withAuthTimeout(supabase.auth.getUser())
           if (cancelled) return
-          setOnboarded(me.onboarded)
-          if (!me.onboarded && pathname !== '/onboarding') {
-            router.replace('/onboarding')
+          if (!authUser) {
+            await bounceToLogin()
+            return
+          }
+          const { data: { session } } = await withAuthTimeout(supabase.auth.getSession())
+          if (cancelled) return
+          if (!session) {
+            await bounceToLogin()
+            return
+          }
+          setUser({ id: userId, email })
+          setAccessToken(session.access_token)
+          try {
+            await fetchKBs({ throwOnError: true })
+          } catch (err) {
+            if (isAuthFailure(err)) {
+              await bounceToLogin()
+              return
+            }
+          }
+
+          try {
+            const me = await apiFetch<{ onboarded: boolean }>('/v1/me', session.access_token)
+            if (cancelled) return
+            setOnboarded(me.onboarded)
+            if (!me.onboarded && pathname !== '/onboarding') {
+              router.replace('/onboarding')
+            }
+          } catch {
+            const stored = useUserStore.getState().onboarded
+            if (stored === null) setOnboarded(true)
           }
         } catch {
-          const stored = useUserStore.getState().onboarded
-          if (stored === null) setOnboarded(true)
+          await bounceToLogin()
         }
-      })
+      })()
 
       const { data } = supabase.auth.onAuthStateChange((_event, session) => {
         if (cancelled) return

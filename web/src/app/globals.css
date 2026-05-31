@@ -410,14 +410,56 @@
    box-decoration-break: clone keeps the yellow contiguous when a highlight
    wraps across line breaks. */
 .llmwiki-hl {
+  position: relative;
   background: rgba(255, 224, 84, 0.55);
   border-radius: 2px;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+.llmwiki-hl:hover {
+  background: rgba(255, 213, 43, 0.72);
+  box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.2);
 }
 .llmwiki-hl[data-llmwiki-comment="1"]::after {
-  content: " ▾";
-  font-size: 0.7em;
-  opacity: 0.6;
-  margin-left: 1px;
+  content: none;
+}
+.llmwiki-hl-comment {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35em;
+  height: 1.35em;
+  margin-left: 2px;
+  transform: translateY(-0.08em);
+  border-radius: 999px;
+  background: rgba(255, 224, 84, 0.35);
+  box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.18);
+  font-size: 0.72em;
+  line-height: 1;
+  vertical-align: baseline;
+  cursor: help;
+}
+.llmwiki-hl-comment:hover {
+  background: rgba(255, 213, 43, 0.65);
+}
+.llmwiki-hl-comment[data-llmwiki-comment-text]:hover::before {
+  content: attr(data-llmwiki-comment-text);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  width: max-content;
+  max-width: min(280px, 70vw);
+  white-space: pre-wrap;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--popover));
+  color: hsl(var(--popover-foreground));
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
 }

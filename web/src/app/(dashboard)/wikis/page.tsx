@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { motion } from 'framer-motion'
 import { useKBStore, useUserStore } from '@/stores'
 import {
-  Plus, Loader2, Upload, LogOut, Moon, Sun, BookOpen,
+  Plus, Loader2, LogOut, Moon, Sun, BookOpen, AlertCircle, RefreshCcw,
 } from 'lucide-react'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -35,6 +35,8 @@ export default function WikisPage() {
   const router = useRouter()
   const knowledgeBases = useKBStore((s) => s.knowledgeBases)
   const loading = useKBStore((s) => s.loading)
+  const error = useKBStore((s) => s.error)
+  const retryFetchKBs = useKBStore((s) => s.fetchKBs)
   const createKB = useKBStore((s) => s.createKB)
   const user = useUserStore((s) => s.user)
   const [creating, setCreating] = React.useState(false)
@@ -74,6 +76,36 @@ export default function WikisPage() {
     return (
       <div className="flex items-center justify-center h-full">
         <Loader2 className="size-5 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="h-full flex flex-col">
+        <PageHeader onNew={() => setDialogOpen(true)} />
+        <div className="flex-1 flex items-center justify-center p-8">
+          <div className="w-full max-w-sm rounded-xl border border-border bg-card p-5 shadow-sm">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-destructive/10 text-destructive">
+                <AlertCircle className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <h1 className="text-sm font-semibold text-foreground">Could not load wikis</h1>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  {error}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => retryFetchKBs()}
+              className="mt-4 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+            >
+              <RefreshCcw className="size-4" />
+              Retry
+            </button>
+          </div>
+        </div>
       </div>
     )
   }

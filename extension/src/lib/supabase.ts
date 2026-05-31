@@ -25,6 +25,7 @@ export function getSupabase(): SupabaseClient {
     _client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: {
         storage: chromeStorageAdapter,
+        flowType: "pkce",
         autoRefreshToken: true,
         persistSession: true,
         detectSessionInUrl: false,

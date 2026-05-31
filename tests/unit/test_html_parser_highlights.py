@@ -5,6 +5,8 @@ produce on the parsed markdown — markdown punctuation removed, block
 separation preserved, inline spans flattened.
 """
 
+import pytest
+
 from html_parser import Parser
 from html_parser.models import TextAnchor
 
@@ -80,6 +82,226 @@ def test_plain_collapses_multiple_blank_lines():
 def test_plain_drops_script_and_style():
     html = "<p>Visible</p><script>alert(1)</script><style>p{color:red}</style>"
     assert _plain(html) == "Visible"
+
+
+# ── Tagged HTML sanitization ──────────────────────────────
+
+
+def test_sanitized_html_strips_executable_attributes_and_urls():
+    html = """
+    <html><head><base href="https://evil.example/"><meta http-equiv="refresh" content="0"></head>
+    <body>
+      <p onclick="alert(1)" style="background:url(javascript:alert(2))">
+        <a href="javascript:alert(3)" target="_blank">bad link</a>
+        <a href="https://example.com/safe" target="_blank">safe link</a>
+        <img src="x.png" onerror="alert(4)" srcdoc="<script>alert(5)</script>" />
+      </p>
+      <iframe srcdoc="<script>alert(6)</script>"></iframe>
+    </body></html>
+    """
+    parser = Parser(html, url="https://source.example/article", content_only=True)
+    parser.parse()
+
+    out = parser.html(sanitize=True)
+
+    assert "onclick" not in out
+    assert "onerror" not in out
+    assert "style=" not in out
+    assert "srcdoc" not in out
+    assert "javascript:" not in out
+    assert "<iframe" not in out
+    assert "<base" not in out
+    assert "<meta" not in out
+    assert 'href="https://example.com/safe"' in out
+    assert 'rel="noopener noreferrer"' in out
+    assert 'src="https://source.example/x.png"' in out
+
+
+def test_sanitized_html_allows_only_safe_image_data_urls():
+    html = """
+    <p>
+      <img src="data:image/png;base64,AAAA" />
+      <img src="data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+" />
+      <img src="data:text/html,<script>alert(1)</script>" />
+    </p>
+    """
+    parser = Parser(html)
+    parser.parse()
+
+    out = parser.html(sanitize=True)
+
+    assert "data:image/png;base64,AAAA" in out
+    assert "data:image/svg+xml" not in out
+    assert "data:text/html" not in out
+
+
+def test_sanitized_html_filters_srcset_entries():
+    html = """
+    <p>
+      <img
+        src="safe.png"
+        srcset="safe-1.png 1x, javascript:alert(1) 2x, data:image/webp;base64,AAAA 3x, data:text/html,evil 4x"
+      />
+    </p>
+    """
+    parser = Parser(html, url="https://source.example/post")
+    parser.parse()
+
+    out = parser.html(sanitize=True)
+
+    assert "srcset=" not in out
+    assert "javascript:" not in out
+    assert "AAAA 3x" not in out
+    assert "data:text/html" not in out
+
+
+def test_sanitized_html_keeps_safe_srcset_without_data_urls():
+    html = '<p><img src="safe.png" srcset="safe-1.png 1x, https://cdn.example/safe-2.png 2x" /></p>'
+    parser = Parser(html, url="https://source.example/post")
+    parser.parse()
+
+    out = parser.html(sanitize=True)
+
+    assert 'srcset="https://source.example/safe-1.png 1x, https://cdn.example/safe-2.png 2x"' in out
+
+
+@pytest.mark.asyncio
+async def test_webclip_image_materialization_rewrites_markdown_to_relative_asset_path():
+    from services.webclip_assets import materialize_webclip_assets
+
+    png_1x1 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    html = f'<p>Lead image:</p><img alt="Tiny image" src="data:image/png;base64,{png_1x1}">'
+    result = Parser(html, url="https://source.example/post").parse()
+
+    markdown, assets = await materialize_webclip_assets(
+        result.content,
+        result.images,
+        "article.assets",
+    )
+
+    assert "llmwiki-image://" not in markdown
+    assert "![Tiny image](./article.assets/image-01.png)" in markdown
+    assert len(assets) == 1
+    assert assets[0].filename == "image-01.png"
+    assert assets[0].content_type == "image/png"
+
+
+def test_parser_instances_are_single_use():
+    parser = Parser(
+        "<p>x</p>",
+        url="https://source.example/post",
+    )
+    parser.parse()
+
+    with pytest.raises(RuntimeError):
+        parser.parse()
+
+
+@pytest.mark.asyncio
+async def test_hosted_webclip_records_storage_size_for_markdown_artifact():
+    from services.hosted import HostedDocumentService
+
+    class Tx:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConn:
+        def __init__(self):
+            self.insert_args = None
+
+        def transaction(self):
+            return Tx()
+
+        async def execute(self, query, *args):
+            return None
+
+        async def fetchrow(self, query, *args):
+            if "storage_limit_bytes" in query:
+                return {"storage_limit_bytes": 100_000}
+            if "INSERT INTO documents" in query:
+                self.insert_args = args
+                return {
+                    "id": "doc-a",
+                    "knowledge_base_id": args[1],
+                    "user_id": args[2],
+                    "filename": args[3],
+                    "path": "/webclipper/",
+                    "title": args[4],
+                    "file_type": "md",
+                    "status": "ready",
+                    "tags": [],
+                    "date": None,
+                    "metadata": {},
+                    "error_message": None,
+                    "version": 0,
+                    "document_number": 1,
+                    "archived": False,
+                    "created_at": None,
+                    "updated_at": None,
+                }
+            return None
+
+        async def fetchval(self, query, *args):
+            if "FROM knowledge_bases" in query:
+                return args[0]
+            if "SUM(file_size)" in query:
+                return 0
+            return None
+
+    class FakePool(FakeConn):
+        def __init__(self):
+            super().__init__()
+            self.conn = FakeConn()
+
+        async def acquire(self):
+            return self.conn
+
+        async def release(self, conn):
+            return None
+
+    class FakeS3:
+        async def upload_bytes(self, key, data, content_type):
+            return None
+
+    pool = FakePool()
+    service = HostedDocumentService(pool=pool, user_id="user-a", s3=FakeS3())
+    await service.create_web_clip("kb-a", "https://example.com", "Title", "<p>Hello</p>")
+
+    assert pool.conn.insert_args is not None
+    file_size = pool.conn.insert_args[5]
+    assert isinstance(file_size, int)
+    assert file_size > 0
+
+
+@pytest.mark.asyncio
+async def test_hosted_webclip_rejects_when_storage_quota_exceeded():
+    from fastapi import HTTPException
+    from services.hosted import HostedDocumentService
+
+    class FakePool:
+        async def fetchrow(self, query, *args):
+            if "storage_limit_bytes" in query:
+                return {"storage_limit_bytes": 3}
+            return None
+
+        async def fetchval(self, query, *args):
+            if "FROM knowledge_bases" in query:
+                return args[0]
+            if "SUM(file_size)" in query:
+                return 0
+            return None
+
+    service = HostedDocumentService(pool=FakePool(), user_id="user-a", s3=None)
+
+    with pytest.raises(HTTPException) as exc:
+        await service.create_web_clip("kb-a", "https://example.com", "Title", "<p>Hello</p>")
+
+    assert exc.value.status_code == 413
 
 
 # ── Highlight locator ─────────────────────────────────────
@@ -177,6 +399,27 @@ def test_parse_no_highlights_returns_empty():
     result = p.parse()
     assert result.highlights == []
     assert result.plaintext == "x"
+
+
+def test_content_only_preserves_article_header_title():
+    html = """
+    <html><body>
+      <header role="banner"><nav>Site nav</nav></header>
+      <article>
+        <header>
+          <p>Supported by</p>
+          <h1>Trump Administration Sees Striking Exodus of Legal Talent</h1>
+          <p>By Eileen Sullivan and Andrea Fuller</p>
+        </header>
+        <p>President Trump's upheaval of the federal government has led to an exodus.</p>
+      </article>
+    </body></html>
+    """
+    result = Parser(html, content_only=True).parse()
+
+    assert "Site nav" not in result.content
+    assert "# Trump Administration Sees Striking Exodus of Legal Talent" in result.content
+    assert "President Trump's upheaval" in result.content
 
 
 def test_parse_highlight_across_inline_tags():

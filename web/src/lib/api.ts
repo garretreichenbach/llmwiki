@@ -20,14 +20,43 @@ export function isApiError(err: unknown): err is ApiError {
   return err instanceof ApiError
 }
 
+function withRequestTimeout(signal: AbortSignal | null | undefined, timeoutMs: number) {
+  const controller = new AbortController()
+  let timedOut = false
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+
+  const abortFromCaller = () => controller.abort(signal?.reason)
+
+  if (signal?.aborted) {
+    abortFromCaller()
+  } else {
+    signal?.addEventListener('abort', abortFromCaller, { once: true })
+    timeoutId = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, timeoutMs)
+  }
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    cleanup: () => {
+      if (timeoutId) clearTimeout(timeoutId)
+      signal?.removeEventListener('abort', abortFromCaller)
+    },
+  }
+}
+
 export async function apiFetch<T>(
   path: string,
   token: string,
   options?: RequestInit,
 ): Promise<T> {
+  const { signal: callerSignal, ...fetchOptions } = options ?? {}
+  const timeout = withRequestTimeout(callerSignal, 15000)
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...options?.headers as Record<string, string>,
+    ...fetchOptions.headers as Record<string, string>,
   }
 
   // In local mode, skip Authorization header (API doesn't check it)
@@ -35,20 +64,28 @@ export async function apiFetch<T>(
     headers.Authorization = `Bearer ${token}`
   }
 
-  const res = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers,
-  })
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
-    const message =
-      typeof body?.detail === 'string'
-        ? body.detail
-        : `API error: ${res.status}`
-    throw new ApiError(res.status, message, body)
+  try {
+    const res = await fetch(`${API_URL}${path}`, {
+      ...fetchOptions,
+      headers,
+      signal: timeout.signal,
+    })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      const message =
+        typeof body?.detail === 'string'
+          ? body.detail
+          : `API error: ${res.status}`
+      throw new ApiError(res.status, message, body)
+    }
+    if (res.status === 204) return undefined as T
+    return res.json()
+  } catch (err) {
+    if (timeout.didTimeout()) throw new Error('API request timeout')
+    throw err
+  } finally {
+    timeout.cleanup()
   }
-  if (res.status === 204) return undefined as T
-  return res.json()
 }
 
 export function getDocumentsWsUrl(kbId: string): string {

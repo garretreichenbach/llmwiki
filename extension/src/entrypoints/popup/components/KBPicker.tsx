@@ -61,21 +61,21 @@ export default function KBPicker({ apiUrl, accessToken, value, onChange }: Props
   }
 
   if (loading) {
-    return <div className="text-xs text-gray-400 py-1">Loading knowledge bases...</div>;
+    return <div className="py-1 text-xs text-zinc-500">Loading knowledge bases...</div>;
   }
 
   return (
     <div className="space-y-1.5">
-      <label className="block text-xs font-medium text-gray-600">Knowledge Base</label>
+      <label className="block text-xs font-medium text-zinc-700">Knowledge Base</label>
 
       {!creating ? (
         <div className="flex gap-2">
           <select
             value={value ?? ""}
             onChange={(e) => { if (e.target.value) onChange(e.target.value); }}
-            className="flex-1 rounded-md border border-gray-300 bg-white px-3 py-1.5
-                       text-sm text-gray-900 shadow-sm focus:border-gray-900
-                       focus:ring-1 focus:ring-gray-900 outline-none"
+            className="h-9 min-w-0 flex-1 rounded-md border border-zinc-200 bg-white px-3
+                       text-sm text-zinc-950 shadow-sm outline-none transition-colors
+                       focus:border-zinc-400 focus:ring-2 focus:ring-zinc-950/10"
           >
             {kbs.length === 0 && (
               <option value="" disabled>No knowledge bases — create one</option>
@@ -86,8 +86,11 @@ export default function KBPicker({ apiUrl, accessToken, value, onChange }: Props
           </select>
           <button
             onClick={() => setCreating(true)}
-            className="px-2 py-1.5 text-xs font-medium text-gray-700 hover:text-gray-900
-                       border border-gray-300 rounded-md hover:bg-gray-50 transition-colors
+            className="h-9 rounded-md border border-zinc-200 bg-white px-3 text-xs
+                       font-medium text-zinc-700 shadow-sm transition-colors
+                       hover:bg-zinc-100 hover:text-zinc-950
+                       focus-visible:outline-none focus-visible:ring-2
+                       focus-visible:ring-zinc-950 focus-visible:ring-offset-2
                        whitespace-nowrap"
           >
             + New
@@ -101,29 +104,30 @@ export default function KBPicker({ apiUrl, accessToken, value, onChange }: Props
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Knowledge base name"
-            className="flex-1 rounded-md border border-gray-300 px-3 py-1.5
-                       text-sm text-gray-900 shadow-sm focus:border-gray-900
-                       focus:ring-1 focus:ring-gray-900 outline-none"
+            className="h-9 min-w-0 flex-1 rounded-md border border-zinc-200 bg-white px-3
+                       text-sm text-zinc-950 shadow-sm outline-none transition-colors
+                       placeholder:text-zinc-400 focus:border-zinc-400
+                       focus:ring-2 focus:ring-zinc-950/10"
           />
           <button
             onClick={handleCreate}
             disabled={!newName.trim()}
-            className="px-3 py-1.5 text-xs font-medium text-white bg-gray-900 rounded-md
-                       hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed
-                       transition-colors"
+            className="h-9 rounded-md bg-zinc-950 px-3 text-xs font-medium text-zinc-50
+                       transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed
+                       disabled:opacity-40"
           >
             Add
           </button>
           <button
             onClick={() => { setCreating(false); setNewName(""); }}
-            className="px-2 py-1.5 text-xs text-gray-500 hover:text-gray-700"
+            className="h-9 rounded-md px-2 text-xs font-medium text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
           >
             Cancel
           </button>
         </div>
       )}
 
-      {error && <p className="text-xs text-red-500">{error}</p>}
+      {error && <p className="text-xs text-red-600">{error}</p>}
     </div>
   );
 }

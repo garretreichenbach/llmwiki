@@ -425,6 +425,28 @@ class SQLiteDocumentRepository:
         )
         await self._db.commit()
 
+    async def create_asset(
+        self, doc_id: str, user_id: str, filename: str, path: str,
+        title: str, file_type: str, file_size: int, metadata: dict,
+    ) -> dict | None:
+        relative_path = (path.rstrip("/") + "/" + filename).lstrip("/")
+
+        cursor = await self._db.execute(
+            "SELECT COALESCE(MAX(document_number), 0) + 1 FROM documents",
+        )
+        row = await cursor.fetchone()
+        doc_number = row[0]
+
+        await self._db.execute(
+            "INSERT INTO documents (id, user_id, filename, title, path, relative_path, source_kind, "
+            "file_type, file_size, status, content, tags, version, document_number, metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'asset', ?, ?, 'ready', NULL, '[]', 0, ?, ?)",
+            (doc_id, user_id, filename, title, path, relative_path, file_type,
+             file_size, doc_number, json.dumps(metadata)),
+        )
+        await self._db.commit()
+        return await self.get(doc_id)
+
 
 class SQLiteKBRepository:
     """Singleton KB compatibility layer. One workspace = one KB."""
@@ -436,7 +458,7 @@ class SQLiteKBRepository:
         cursor = await self._db.execute(
             "SELECT w.id, w.user_id, w.name, w.name as slug, w.description, "
             "w.created_at, w.created_at as updated_at, "
-            "(SELECT count(*) FROM documents WHERE source_kind != 'wiki' AND status != 'failed') as source_count, "
+            "(SELECT count(*) FROM documents WHERE source_kind = 'source' AND status != 'failed') as source_count, "
             "(SELECT count(*) FROM documents WHERE source_kind = 'wiki' AND status != 'failed') as wiki_page_count "
             "FROM workspace w",
         )
@@ -447,7 +469,7 @@ class SQLiteKBRepository:
         cursor = await self._db.execute(
             "SELECT w.id, w.user_id, w.name, w.name as slug, w.description, "
             "w.created_at, w.created_at as updated_at, "
-            "(SELECT count(*) FROM documents WHERE source_kind != 'wiki' AND status != 'failed') as source_count, "
+            "(SELECT count(*) FROM documents WHERE source_kind = 'source' AND status != 'failed') as source_count, "
             "(SELECT count(*) FROM documents WHERE source_kind = 'wiki' AND status != 'failed') as wiki_page_count "
             "FROM workspace w WHERE w.id = ?",
             (kb_id,),

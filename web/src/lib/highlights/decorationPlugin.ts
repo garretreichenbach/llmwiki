@@ -16,6 +16,7 @@ import type { DecorationRange } from './types'
 
 export const HIGHLIGHT_CLASS = 'llmwiki-hl'
 export const HIGHLIGHT_ATTR = 'data-hl-id'
+export const COMMENT_CLASS = 'llmwiki-hl-comment'
 
 interface HighlightMeta {
   setDecorations?: DecorationRange[]
@@ -40,12 +41,35 @@ export function highlightDecorationPlugin(): Plugin<DecorationSet> {
           const sorted = [...meta.setDecorations]
             .filter((r) => r.from < r.to)
             .sort((a, b) => (a.from - b.from) || (a.to - b.to))
-          const decorations = sorted.map((r) =>
-            Decoration.inline(r.from, r.to, {
+          const decorations = sorted.flatMap((r) => {
+            const attrs: Record<string, string> = {
               class: HIGHLIGHT_CLASS,
               [HIGHLIGHT_ATTR]: r.id,
-            }),
-          )
+            }
+            const comment = r.comment?.trim()
+            if (comment) {
+              attrs['data-llmwiki-comment'] = '1'
+              attrs['data-llmwiki-comment-text'] = comment
+              attrs.title = comment
+            }
+            const inline = Decoration.inline(r.from, r.to, attrs)
+            if (!comment) return [inline]
+
+            const widget = Decoration.widget(
+              r.to,
+              () => {
+                const el = document.createElement('span')
+                el.className = COMMENT_CLASS
+                el.textContent = '💬'
+                el.title = comment
+                el.setAttribute(HIGHLIGHT_ATTR, r.id)
+                el.setAttribute('data-llmwiki-comment-text', comment)
+                return el
+              },
+              { side: 1, key: `${r.id}:comment` },
+            )
+            return [inline, widget]
+          })
           return DecorationSet.create(tr.doc, decorations)
         }
         return old.map(tr.mapping, tr.doc)

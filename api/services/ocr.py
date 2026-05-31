@@ -12,6 +12,7 @@ import httpx
 from config import settings
 from services.s3 import S3Service
 from services.chunker import chunk_text, chunk_pages, store_chunks
+from services.extracted_assets import ExtractedAsset, build_pdf_image_assets
 from services.pdf_extract import extract_pdf
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,7 @@ class OCRService:
             await self._set_status(document_id, "processing")
 
             doc = await self._pool.fetchrow(
-                "SELECT filename, file_type, knowledge_base_id::text as kb_id "
+                "SELECT filename, file_type, path, knowledge_base_id::text as kb_id "
                 "FROM documents WHERE id = $1 AND user_id = $2",
                 document_id, user_id,
             )
@@ -199,26 +200,14 @@ class OCRService:
             await self._s3.download_to_file(s3_source_key, str(pdf_path))
             pages_with_images = await asyncio.to_thread(extract_pdf, str(pdf_path))
 
-        # Upload extracted images to S3 and build per-page elements metadata
-        page_elements: dict[int, dict] = {}
-        for page_num, _, images in pages_with_images:
-            if not images:
-                continue
-            page_imgs = []
-            for img in images:
-                mime = "image/jpeg" if img["format"] == "jpeg" else "image/png"
-                await self._s3.upload_bytes(
-                    f"{user_id}/{document_id}/images/{img['id']}",
-                    img["bytes"], mime,
-                )
-                page_imgs.append({"id": img["id"]})
-            page_elements[page_num] = {"images": page_imgs}
+        assets, page_elements = await self._build_pdf_assets(document_id, pages_with_images)
 
         page_contents = [(num, md) for num, md, _ in pages_with_images]
         await self._store_extracted_pages(
             document_id, user_id, kb_id, page_contents, "opendataloader",
-            page_elements=page_elements,
+            page_elements=page_elements, assets=assets,
         )
+        await self._upload_assets(user_id, assets)
 
     # ── Office local fallback (no converter) ──────────────────────────────
 
@@ -289,32 +278,48 @@ class OCRService:
 
             pages_with_images = await asyncio.to_thread(extract_pdf, str(pdf_path))
 
-        page_elements: dict[int, dict] = {}
-        for page_num, _, images in pages_with_images:
-            if not images:
-                continue
-            page_imgs = []
-            for img in images:
-                mime = "image/jpeg" if img["format"] == "jpeg" else "image/png"
-                await self._s3.upload_bytes(
-                    f"{user_id}/{document_id}/images/{img['id']}",
-                    img["bytes"], mime,
-                )
-                page_imgs.append({"id": img["id"]})
-            page_elements[page_num] = {"images": page_imgs}
+        assets, page_elements = await self._build_pdf_assets(document_id, pages_with_images)
 
         page_contents = [(num, md) for num, md, _ in pages_with_images]
         await self._store_extracted_pages(
             document_id, user_id, kb_id, page_contents, "libreoffice+opendataloader",
-            page_elements=page_elements,
+            page_elements=page_elements, assets=assets,
         )
+        await self._upload_assets(user_id, assets)
 
     # ── Shared page storage ───────────────────────────────────────────────
+
+    async def _build_pdf_assets(
+        self,
+        document_id: str,
+        pages_with_images: list[tuple[int, str, list[dict]]],
+    ) -> tuple[list[ExtractedAsset], dict[int, dict]]:
+        doc = await self._pool.fetchrow(
+            "SELECT filename, path FROM documents WHERE id = $1",
+            document_id,
+        )
+        if not doc:
+            return [], {}
+        return build_pdf_image_assets(
+            document_id,
+            doc["filename"],
+            doc["path"],
+            pages_with_images,
+        )
+
+    async def _upload_assets(self, user_id: str, assets: list[ExtractedAsset]) -> None:
+        for asset in assets:
+            await self._s3.upload_bytes(
+                f"{user_id}/{asset.document_id}/source.{asset.file_type}",
+                asset.data,
+                asset.content_type,
+            )
 
     async def _store_extracted_pages(
         self, document_id: str, user_id: str, kb_id: str,
         page_contents: list[tuple[int, str]], parser: str,
         page_elements: dict[int, dict] | None = None,
+        assets: list[ExtractedAsset] | None = None,
     ):
         """Store pages/chunks and update document status."""
         num_pages = len(page_contents)
@@ -335,6 +340,12 @@ class OCRService:
                 # can't both pass and over-commit.
                 await self._check_user_page_limit(user_id, num_pages, conn=conn)
                 await conn.execute("DELETE FROM document_pages WHERE document_id = $1", document_id)
+                await conn.execute(
+                    "DELETE FROM documents WHERE user_id = $1 "
+                    "AND metadata->>'parent_document_id' = $2 "
+                    "AND metadata->>'kind' = 'pdf_image'",
+                    user_id, document_id,
+                )
                 for num, md in page_contents:
                     elements = (page_elements or {}).get(num)
                     await conn.execute(
@@ -343,10 +354,32 @@ class OCRService:
                         document_id, num, md,
                         json.dumps(elements) if elements else None,
                     )
+                for asset in assets or []:
+                    await conn.execute(
+                        "INSERT INTO documents (id, knowledge_base_id, user_id, filename, path, title, "
+                        "file_type, file_size, status, content, tags, metadata) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ready', NULL, $9, $10::jsonb)",
+                        asset.document_id,
+                        kb_id,
+                        user_id,
+                        asset.filename,
+                        asset.path,
+                        asset.filename,
+                        asset.file_type,
+                        len(asset.data),
+                        [],
+                        json.dumps(asset.metadata()),
+                    )
+                metadata_patch = (
+                    json.dumps({"assets": [asset.metadata() for asset in assets]})
+                    if assets else None
+                )
                 await conn.execute(
                     "UPDATE documents SET status = 'ready', content = $2, page_count = $3, "
-                    "parser = $4, updated_at = now() WHERE id = $1",
-                    document_id, full_content, num_pages, parser,
+                    "parser = $4, metadata = CASE WHEN $5::jsonb IS NULL THEN metadata "
+                    "ELSE COALESCE(metadata, '{}'::jsonb) || $5::jsonb END, "
+                    "updated_at = now() WHERE id = $1",
+                    document_id, full_content, num_pages, parser, metadata_patch,
                 )
         finally:
             await self._pool.release(conn)
@@ -384,7 +417,7 @@ class OCRService:
         result = parser.parse()
 
         await parser.embed_images()
-        tagged_html = parser.html()
+        tagged_html = parser.html(sanitize=True)
 
         await self._s3.upload_bytes(
             f"{user_id}/{document_id}/tagged.html",
@@ -497,7 +530,10 @@ class OCRService:
                 f"Document has {len(pages)} pages, maximum is {settings.QUOTA_MAX_PAGES_PER_DOC}."
             )
 
+        pages_with_images = []
         for page in pages:
+            page_num = page.get("index", 0) + 1
+            extracted_images = []
             for img in page.get("images", []):
                 img_id = img.get("id")
                 img_b64 = img.get("image_base64")
@@ -506,11 +542,14 @@ class OCRService:
                 if img_b64.startswith("data:"):
                     img_b64 = img_b64.split(",", 1)[1]
                 img_bytes = base64.b64decode(img_b64)
-                await self._s3.upload_bytes(
-                    f"{user_id}/{document_id}/images/{img_id}",
-                    img_bytes,
-                    "image/jpeg",
-                )
+                extracted_images.append({
+                    "id": img_id,
+                    "bytes": img_bytes,
+                    "format": "jpg",
+                })
+            pages_with_images.append((page_num, page.get("markdown", ""), extracted_images))
+
+        assets, page_elements = await self._build_pdf_assets(document_id, pages_with_images)
 
         page_count = len(pages)
         content_parts = [page.get("markdown", "") for page in pages]
@@ -527,11 +566,9 @@ class OCRService:
                     page_index = page.get("index", 0) + 1
                     page_md = page.get("markdown", "")
                     elements = {}
-                    if page.get("images"):
-                        elements["images"] = [
-                            {k: v for k, v in img.items() if k != "image_base64"}
-                            for img in page["images"]
-                        ]
+                    page_assets = page_elements.get(page_index, {}).get("images")
+                    if page_assets:
+                        elements["images"] = page_assets
                     if page.get("dimensions"):
                         elements["dimensions"] = page["dimensions"]
                     if page.get("tables"):
@@ -543,13 +580,42 @@ class OCRService:
                         json.dumps(elements) if elements else None,
                     )
                 await conn.execute(
-                    "UPDATE documents SET status = 'ready', content = $2, page_count = $3, parser = 'mistral', updated_at = now() "
-                    "WHERE id = $1",
-                    document_id, full_content, page_count,
+                    "DELETE FROM documents WHERE user_id = $1 "
+                    "AND metadata->>'parent_document_id' = $2 "
+                    "AND metadata->>'kind' = 'pdf_image'",
+                    user_id, document_id,
+                )
+                for asset in assets:
+                    await conn.execute(
+                        "INSERT INTO documents (id, knowledge_base_id, user_id, filename, path, title, "
+                        "file_type, file_size, status, content, tags, metadata) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ready', NULL, $9, $10::jsonb)",
+                        asset.document_id,
+                        kb_id,
+                        user_id,
+                        asset.filename,
+                        asset.path,
+                        asset.filename,
+                        asset.file_type,
+                        len(asset.data),
+                        [],
+                        json.dumps(asset.metadata()),
+                    )
+                metadata_patch = (
+                    json.dumps({"assets": [asset.metadata() for asset in assets]})
+                    if assets else None
+                )
+                await conn.execute(
+                    "UPDATE documents SET status = 'ready', content = $2, page_count = $3, "
+                    "parser = 'mistral', metadata = CASE WHEN $4::jsonb IS NULL THEN metadata "
+                    "ELSE COALESCE(metadata, '{}'::jsonb) || $4::jsonb END, "
+                    "updated_at = now() WHERE id = $1",
+                    document_id, full_content, page_count, metadata_patch,
                 )
         finally:
             await self._pool.release(conn)
 
+        await self._upload_assets(user_id, assets)
         await store_chunks(self._pool, document_id, user_id, kb_id, chunks)
         logger.info("OCR complete: doc=%s pages=%d chunks=%d", document_id[:8], page_count, len(chunks))
 
