@@ -14,8 +14,9 @@ import httpx
 from html_parser import Image
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-IMAGE_TIMEOUT = 10
+IMAGE_TIMEOUT = 5
 IMAGE_CONCURRENCY = 6
+IMAGE_TOTAL_BUDGET = 6
 MAX_IMAGE_REDIRECTS = 3
 MAX_REMOTE_IMAGES = 50
 
@@ -112,7 +113,13 @@ async def materialize_webclip_assets(
             height=image.height or inferred_height,
         )
 
-    await asyncio.gather(*(fetch_one(i, image) for i, image in enumerate(images, start=1)))
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(fetch_one(i, image) for i, image in enumerate(images, start=1))),
+            timeout=IMAGE_TOTAL_BUDGET,
+        )
+    except TimeoutError:
+        pass  # keep whatever materialized within budget; drop the rest
 
     for image in sorted(images, key=lambda img: len(img.ref or ""), reverse=True):
         token = f"llmwiki-image://{image.ref}"

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import {
   getDocumentByUrl,
+  moveDocument,
   saveWebPage,
   savePdf,
   type DocumentByUrl,
@@ -15,48 +16,13 @@ import {
 } from "@/lib/settings";
 import KBPicker from "./KBPicker";
 import StatusFeedback, { type Status } from "./StatusFeedback";
-import { recordSave } from "@/lib/streak";
-import { enableSiteFromPopup } from "@/lib/permissions";
-
-const TRACKING_PARAMS = new Set([
-  "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-  "utm_id", "utm_name", "utm_brand", "utm_social",
-  "fbclid", "gclid", "mc_cid", "mc_eid", "ref", "ref_src",
-  "_branch_match_id", "igshid",
-]);
-
-function canonicalize(href: string): string {
-  try {
-    const u = new URL(href);
-    u.hash = "";
-    const keep = new URLSearchParams();
-    u.searchParams.forEach((v, k) => {
-      if (!TRACKING_PARAMS.has(k.toLowerCase())) keep.append(k, v);
-    });
-    u.search = keep.toString() ? `?${keep.toString()}` : "";
-    if (u.pathname.length > 1 && u.pathname.endsWith("/")) {
-      u.pathname = u.pathname.replace(/\/+$/, "");
-    }
-    return u.toString();
-  } catch {
-    return href;
-  }
-}
+import { canonicalize } from "@/lib/url";
 
 function safeHost(href: string): string {
   try {
     return new URL(href).hostname.replace(/^www\./, "");
   } catch {
     return href;
-  }
-}
-
-function httpOriginOf(href: string): string | null {
-  try {
-    const { origin, protocol } = new URL(href);
-    return protocol === "http:" || protocol === "https:" ? origin : null;
-  } catch {
-    return null;
   }
 }
 
@@ -107,11 +73,7 @@ export default function SaveForm({ apiUrl, accessToken }: Props) {
   }, []);
 
   useEffect(() => {
-    if (!tab || tab.isPdf) {
-      setExistingDoc(null);
-      setCheckingExisting(false);
-      return;
-    }
+    if (!tab) return;
 
     let cancelled = false;
 
@@ -160,18 +122,18 @@ export default function SaveForm({ apiUrl, accessToken }: Props) {
 
     setTab({ url, title: activeTab.title ?? "", isPdf, tabId: activeTab.id });
     setTitle(activeTab.title ?? "");
+
+    // Inject the highlighter under the activeTab grant so saved highlights
+    // overlay and the user can annotate. No-op on PDFs / restricted pages.
+    if (/^https?:/.test(url) && !isPdf) {
+      chrome.scripting
+        .executeScript({ target: { tabId: activeTab.id }, files: ["content-scripts/content.js"] })
+        .catch(() => {});
+    }
   }
 
   async function handleSave() {
     if (!tab || !knowledgeBaseId) return;
-
-    // First in the gesture: chrome.permissions.request needs an active gesture.
-    // activeTab covers the capture below, so a decline doesn't block saving.
-    const origin = httpOriginOf(tab.url);
-    if (origin) {
-      await enableSiteFromPopup(origin, tab.tabId).catch(() => false);
-    }
-
     try {
       if (tab.isPdf) {
         await handleSavePdf();
@@ -267,7 +229,8 @@ export default function SaveForm({ apiUrl, accessToken }: Props) {
             const cloneImg = cloneImages[item.index];
             if (!cloneImg) continue;
 
-            // Cross-origin images are fetched server-side; just normalize the src.
+            // Under activeTab we can only read same-origin resources; cross-origin
+            // images keep their absolute URL for the server-side fetch.
             if (!isSameOrigin(item.src)) {
               cloneImg.setAttribute("src", item.src);
               cloneImg.removeAttribute("srcset");
@@ -427,8 +390,7 @@ export default function SaveForm({ apiUrl, accessToken }: Props) {
     });
     setSelectedKnowledgeBaseId(knowledgeBaseId).catch(() => {});
     setSelectedFolderPath(normalizedFolderPath).catch(() => {});
-    const stats = await recordSave().catch(() => null);
-    setStatus({ type: "success", stats: stats ?? undefined });
+    setStatus({ type: "success" });
   }
 
   async function handleSavePdf() {
@@ -453,13 +415,22 @@ export default function SaveForm({ apiUrl, accessToken }: Props) {
 
     setSelectedKnowledgeBaseId(knowledgeBaseId).catch(() => {});
     setSelectedFolderPath(normalizedFolderPath).catch(() => {});
-    const stats = await recordSave().catch(() => null);
-    setStatus({ type: "success", stats: stats ?? undefined });
+    setStatus({ type: "success" });
   }
 
-  function handleKnowledgeBaseChange(id: string) {
+  async function handleKnowledgeBaseChange(id: string) {
     setKnowledgeBaseId(id);
     setSelectedKnowledgeBaseId(id).catch(() => {});
+    // If the page is already saved (instant-save just ran), changing the KB
+    // moves the document rather than selecting a target for a future save.
+    if (existingDoc && existingDoc.knowledge_base_id !== id) {
+      try {
+        await moveDocument(apiUrl, accessToken, existingDoc.id, id);
+        setExistingDoc({ ...existingDoc, knowledge_base_id: id });
+      } catch {
+        setStatus({ type: "error", message: "Couldn't move to that knowledge base." });
+      }
+    }
   }
 
   if (!tab) {

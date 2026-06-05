@@ -236,6 +236,22 @@ export async function replaceHighlights(
   return res.data as HighlightsResponse;
 }
 
+export async function moveDocument(
+  apiUrl: string,
+  accessToken: string | null,
+  documentId: string,
+  knowledgeBaseId: string,
+): Promise<void> {
+  const res = await smartFetch(`${apiUrl}/v1/documents/${documentId}`, {
+    method: "PATCH",
+    headers: jsonHeaders(accessToken),
+    body: JSON.stringify({ knowledge_base_id: knowledgeBaseId }),
+  });
+  if (!res.ok) {
+    throw new Error(`Move failed (${res.status})`);
+  }
+}
+
 export async function upsertHighlight(
   apiUrl: string,
   accessToken: string | null,

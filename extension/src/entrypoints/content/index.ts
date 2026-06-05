@@ -29,13 +29,17 @@ import {
 } from "@/lib/settings";
 
 export default defineContentScript({
-  // WXT folds a runtime script's `matches` into host_permissions, so this stays
-  // the API origin; real per-origin matches come from dynamic registration.
+  // Injected on demand via chrome.scripting.executeScript when the popup opens
+  // (under the activeTab grant) — never auto-mounted. `matches` is the API
+  // origin only so WXT doesn't fold a broad host into the manifest.
   matches: ["https://api.llmwiki.app/*"],
   registration: "runtime",
   runAt: "document_idle",
   cssInjectionMode: "manual",
   async main() {
+    const w = window as unknown as { __llmwikiLoaded?: boolean };
+    if (w.__llmwikiLoaded) return;
+    w.__llmwikiLoaded = true;
     if (isRestrictedPage()) return;
     if (isLlmWikiAppPage()) return;
     if (await isDomainDisabled(location.hostname)) return;
@@ -665,20 +669,8 @@ class HighlightController {
     save.className = "llmwiki-save";
     save.textContent = "Save";
     save.onclick = () => {
-      const value = textarea.value.trim() || null;
-      highlight.comment = value;
-      // A multi-node highlight has multiple marks under the same id — keep
-      // the comment indicator in sync across all of them.
-      for (const m of findAllMarks(highlight.id)) {
-        m.toggleAttribute("data-llmwiki-comment", !!value);
-        if (value) {
-          m.setAttribute("data-llmwiki-comment-text", value);
-          m.setAttribute("title", value);
-        } else {
-          m.removeAttribute("data-llmwiki-comment-text");
-          m.removeAttribute("title");
-        }
-      }
+      highlight.comment = textarea.value.trim() || null;
+      this.syncCommentMarkers(highlight);
       this.savePendingPageState();
       this.removePopover();
       this.persistHighlight(highlight, "Comment saved");
@@ -792,11 +784,12 @@ class HighlightController {
   private syncCommentMarkers(highlight: Highlight) {
     const comment = highlight.comment?.trim() || null;
     for (const mark of findAllMarks(highlight.id)) {
-      mark.toggleAttribute("data-llmwiki-comment", !!comment);
       if (comment) {
+        mark.setAttribute("data-llmwiki-comment", "1");
         mark.setAttribute("data-llmwiki-comment-text", comment);
         mark.setAttribute("title", comment);
       } else {
+        mark.removeAttribute("data-llmwiki-comment");
         mark.removeAttribute("data-llmwiki-comment-text");
         mark.removeAttribute("title");
       }

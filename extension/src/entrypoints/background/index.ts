@@ -1,7 +1,6 @@
 import { getSupabase } from "@/lib/supabase";
 import { getApiUrl } from "@/lib/settings";
 import { isAllowedApiFetchUrl, isSupportedRemoteResourceUrl } from "@/lib/security";
-import { registerForGrantedOrigins } from "@/lib/permissions";
 import type { AuthChangeEvent, Session } from "@supabase/auth-js";
 
 type Message =
@@ -28,10 +27,6 @@ interface ApiFetchResponse {
 
 export default defineBackground(() => {
   const supabase = getSupabase();
-
-  registerForGrantedOrigins();
-  chrome.runtime.onStartup.addListener(() => registerForGrantedOrigins());
-  chrome.runtime.onInstalled.addListener(() => registerForGrantedOrigins());
 
   supabase.auth.onAuthStateChange((_event: AuthChangeEvent, _session: Session | null) => {});
 

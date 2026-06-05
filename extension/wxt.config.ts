@@ -24,8 +24,9 @@ export default defineConfig({
     description: "Save any web page or PDF to your LLM Wiki knowledge base",
     version: "0.1.0",
     permissions: ["activeTab", "identity", "storage", "scripting"],
+    // The page is reached via activeTab on the toolbar click; host_permissions
+    // is only the API origin so the extension can call its own backend.
     host_permissions: [`${apiOrigin}/*`, "http://localhost/*"],
-    optional_host_permissions: ["https://*/*", "http://*/*"],
     icons: {
       16: "icon/16.png",
       32: "icon/32.png",

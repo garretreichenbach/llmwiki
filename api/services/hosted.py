@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
-from typing import Any
 from datetime import datetime
+from typing import Any
 
 import asyncpg
-from fastapi import HTTPException
-
 from config import settings
+from fastapi import HTTPException
 from services.chunker import chunk_text, store_chunks
 from services.webclip_assets import materialize_webclip_assets
-from .base import UserService, KBService, DocumentService, PublicWikiService, ServiceFactory
-from .parsers import parse_frontmatter, title_from_filename, extract_tags
+
+from .base import DocumentService, KBService, PublicWikiService, ServiceFactory, UserService
+from .parsers import parse_frontmatter, title_from_filename
+
+logger = logging.getLogger(__name__)
 
 
 class HostedUserService(UserService):
@@ -100,9 +103,10 @@ def _slugify(name: str) -> str:
 
 class HostedKBService(KBService):
 
-    def __init__(self, pool, user_id: str):
+    def __init__(self, pool, user_id: str, s3=None):
         self.pool = pool
         self.user_id = user_id
+        self.s3 = s3
 
     async def list(self) -> list[dict]:
         rows = await self.pool.fetch(
@@ -223,11 +227,27 @@ class HostedKBService(KBService):
         return dict(row) if row else None
 
     async def delete(self, kb_id: str) -> bool:
+        # Deleting the KB cascades its documents in Postgres, but the S3 objects
+        # for each document must be purged explicitly first.
+        await self._purge_kb_s3(kb_id)
         result = await self.pool.execute(
             "DELETE FROM knowledge_bases WHERE id = $1 AND user_id = $2",
             kb_id, self.user_id,
         )
         return result != "DELETE 0"
+
+    async def _purge_kb_s3(self, kb_id: str) -> None:
+        if not self.s3:
+            return
+        rows = await self.pool.fetch(
+            "SELECT id::text FROM documents WHERE knowledge_base_id = $1 AND user_id = $2",
+            kb_id, self.user_id,
+        )
+        for row in rows:
+            try:
+                await self.s3.delete_prefix(f"{self.user_id}/{row['id']}/")
+            except Exception:
+                logger.exception("S3 purge failed for document %s", row["id"])
 
     async def _unique_slug(self, name: str) -> str:
         base = _slugify(name)
@@ -436,6 +456,7 @@ class HostedDocumentService(DocumentService):
                     asset.content_type,
                 )
 
+        old_asset_ids: list[str] = []
         conn = await self.pool.acquire()
         try:
             async with conn.transaction():
@@ -471,6 +492,20 @@ class HostedDocumentService(DocumentService):
                         path, title, markdown_size, markdown, json.dumps(parent_metadata),
                         json.dumps(next_highlights), parent_doc_id, self.user_id,
                     )
+                    # Re-clip of the same URL: clear the previous asset docs so
+                    # the fresh assets don't collide on (kb, path, filename).
+                    old_asset_ids = [
+                        r["id"] for r in await conn.fetch(
+                            "SELECT id::text FROM documents WHERE user_id = $1 "
+                            "AND metadata->>'parent_document_id' = $2",
+                            self.user_id, parent_doc_id,
+                        )
+                    ]
+                    if old_asset_ids:
+                        await conn.execute(
+                            "DELETE FROM documents WHERE id = ANY($1::uuid[]) AND user_id = $2",
+                            old_asset_ids, self.user_id,
+                        )
                 else:
                     next_highlights = enriched
                     row = await conn.fetchrow(
@@ -518,6 +553,8 @@ class HostedDocumentService(DocumentService):
                     )
         finally:
             await self.pool.release(conn)
+
+        await self._purge_s3(old_asset_ids)
 
         response = dict(row)
         response["highlights"] = next_highlights
@@ -759,7 +796,9 @@ class HostedDocumentService(DocumentService):
         the documents.highlights write commit atomically.
         """
         from services.highlight_chunks import (
-            ChunkRecord, all_affected_chunks, iter_chunks_with_annotations,
+            ChunkRecord,
+            all_affected_chunks,
+            iter_chunks_with_annotations,
         )
 
         rows = await conn.fetch(
@@ -1009,14 +1048,7 @@ class HostedDocumentService(DocumentService):
                 doc_id, self.user_id,
             )
             return result != "UPDATE 0"
-        await self.pool.execute("DELETE FROM document_pages WHERE document_id = $1", doc_id)
-        await self.pool.execute("DELETE FROM document_chunks WHERE document_id = $1", doc_id)
-        await self.pool.execute("DELETE FROM document_references WHERE source_document_id = $1 OR target_document_id = $1", doc_id)
-        result = await self.pool.execute(
-            "DELETE FROM documents WHERE id = $1 AND user_id = $2",
-            doc_id, self.user_id,
-        )
-        return result != "DELETE 0"
+        return await self._hard_delete([doc_id]) > 0
 
     async def bulk_delete(self, doc_ids: list[str]) -> int:
         if not doc_ids:
@@ -1034,16 +1066,36 @@ class HostedDocumentService(DocumentService):
                 wiki_ids, self.user_id,
             )
             count += int(result.split()[-1]) if result else 0
-        if source_ids:
-            await self.pool.execute("DELETE FROM document_pages WHERE document_id = ANY($1::uuid[])", source_ids)
-            await self.pool.execute("DELETE FROM document_chunks WHERE document_id = ANY($1::uuid[])", source_ids)
-            await self.pool.execute("DELETE FROM document_references WHERE source_document_id = ANY($1::uuid[]) OR target_document_id = ANY($1::uuid[])", source_ids)
-            result = await self.pool.execute(
-                "DELETE FROM documents WHERE id = ANY($1::uuid[]) AND user_id = $2",
-                source_ids, self.user_id,
-            )
-            count += int(result.split()[-1]) if result else 0
+        count += await self._hard_delete(source_ids)
         return count
+
+    async def _hard_delete(self, source_ids: list[str]) -> int:
+        if not source_ids:
+            return 0
+        doc_ids = source_ids + await self._child_asset_ids(source_ids)
+        await self._purge_s3(doc_ids)
+        result = await self.pool.execute(
+            "DELETE FROM documents WHERE id = ANY($1::uuid[]) AND user_id = $2",
+            doc_ids, self.user_id,
+        )
+        return int(result.split()[-1]) if result else 0
+
+    async def _child_asset_ids(self, parent_ids: list[str]) -> list[str]:
+        rows = await self.pool.fetch(
+            "SELECT id::text FROM documents WHERE user_id = $1 "
+            "AND metadata->>'parent_document_id' = ANY($2::text[])",
+            self.user_id, parent_ids,
+        )
+        return [r["id"] for r in rows]
+
+    async def _purge_s3(self, doc_ids: list[str]) -> None:
+        if not self.s3:
+            return
+        for doc_id in doc_ids:
+            try:
+                await self.s3.delete_prefix(f"{self.user_id}/{doc_id}/")
+            except Exception:
+                logger.exception("S3 purge failed for document %s", doc_id)
 
 
 class HostedPublicWikiService(PublicWikiService):
@@ -1149,8 +1201,8 @@ class HostedServiceFactory(ServiceFactory):
     def user_service(self, user_id: str) -> HostedUserService:
         return HostedUserService(self.pool, user_id)
 
-    def kb_service(self, user_id: str) -> "HostedKBService":
-        return HostedKBService(self.pool, user_id)
+    def kb_service(self, user_id: str) -> HostedKBService:
+        return HostedKBService(self.pool, user_id, self.s3)
 
     def document_service(self, user_id: str) -> HostedDocumentService:
         return HostedDocumentService(self.pool, user_id, self.s3)

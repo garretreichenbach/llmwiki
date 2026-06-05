@@ -187,19 +187,18 @@ export function FilesGrid({
   const [activeDocId, setActiveDocId] = React.useState<string | null>(initialDocId ?? null)
   const [docInitialPage, setDocInitialPage] = React.useState<number | undefined>(initialPage)
 
-  // Sync from route when browser back/forward changes initialPath
   React.useEffect(() => {
     const path = initialPath ?? '/'
-    if (path !== currentPath) {
-      setCurrentPath(path)
-      setHistory((prev) => {
-        const next = prev.slice(0, historyIdx + 1)
-        next.push(path)
-        return next
-      })
-      setHistoryIdx((prev) => prev + 1)
+    if (path === currentPath) return
+    setCurrentPath(path)
+    if (history[historyIdx - 1] === path) {
+      setHistoryIdx(historyIdx - 1)
+    } else if (history[historyIdx + 1] === path) {
+      setHistoryIdx(historyIdx + 1)
+    } else {
+      setHistory(history.slice(0, historyIdx + 1).concat(path))
+      setHistoryIdx(historyIdx + 1)
     }
-    // Only react to prop changes, not internal navigation
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialPath])
 
@@ -277,19 +276,13 @@ export function FilesGrid({
       return
     }
     if (historyIdx <= 0) return
-    const newIdx = historyIdx - 1
-    setHistoryIdx(newIdx)
-    setCurrentPath(history[newIdx])
-    onPathChange?.(history[newIdx])
-  }, [isBrowsing, closeDoc, historyIdx, history, onPathChange])
+    window.history.back()
+  }, [isBrowsing, closeDoc, historyIdx])
 
   const goForward = React.useCallback(() => {
     if (!isBrowsing || !canGoForward) return
-    const newIdx = historyIdx + 1
-    setHistoryIdx(newIdx)
-    setCurrentPath(history[newIdx])
-    onPathChange?.(history[newIdx])
-  }, [isBrowsing, canGoForward, historyIdx, history, onPathChange])
+    window.history.forward()
+  }, [isBrowsing, canGoForward])
 
   // Grid data
   const folders = React.useMemo(() => getChildFolders(sourceDocs, currentPath), [sourceDocs, currentPath])
