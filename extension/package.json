@@ -31,17 +31,20 @@
     "wxt": "0.19.29"
   },
   "overrides": {
-    "vite": "7.3.2",
+    "vite": "6.4.3",
     "wxt": {
-      "vite": "6.4.2"
+      "vite": "6.4.3"
     },
+    "esbuild": "0.28.1",
+    "shell-quote": "1.8.4",
+    "@babel/core": "7.29.7",
     "rollup": "4.59.0",
-    "tar": "7.5.11",
+    "tar": "7.5.16",
     "node-forge": "1.4.0",
     "defu": "6.1.5",
     "postcss": "8.5.10",
-    "ws": "8.20.1",
-    "tmp": "0.2.6",
+    "ws": "8.21.0",
+    "tmp": "0.2.7",
     "uuid": "14.0.0",
     "minimatch": "10.2.3",
     "multimatch": {
