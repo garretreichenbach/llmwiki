@@ -60,7 +60,9 @@
     "ws": "8.21.0",
     "dompurify": "3.4.9",
     "markdown-it": "14.2.0",
-    "@babel/core": "7.29.7"
+    "@babel/core": "7.29.7",
+    "@tiptap/core": "3.22.2",
+    "@tiptap/pm": "3.22.2"
   },
   "optionalDependencies": {
     "lightningcss-linux-x64-gnu": "1.32.0",

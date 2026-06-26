@@ -339,6 +339,10 @@ function WikiTreeNode({
   const hasActiveChild = hasChildren && node.children!.some((c) => c.path === activePath)
   const [expanded, setExpanded] = React.useState(true)
 
+  React.useEffect(() => {
+    if (hasActiveChild) setExpanded(true)
+  }, [hasActiveChild])
+
   return (
     <div>
       <div
@@ -377,7 +381,7 @@ function WikiTreeNode({
         <span className="truncate flex-1 min-w-0">{node.title}</span>
       </div>
       <AnimatePresence initial={false}>
-        {hasChildren && (expanded || hasActiveChild) && (
+        {hasChildren && expanded && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
