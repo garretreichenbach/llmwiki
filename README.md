@@ -39,6 +39,8 @@ Here's how to get started locally.
 
 **1. Install.** Clone the repo and install the Python and web dependencies.
 
+macOS / Linux:
+
 ```bash
 git clone https://github.com/lucasastorian/llmwiki.git
 cd llmwiki
@@ -47,10 +49,22 @@ pip install -r api/requirements.txt -r mcp/requirements.txt
 cd web && npm install && cd ..
 ```
 
-**2. Point it at a folder of your files** — PDFs, Word documents, PowerPoints, Markdown, notes. LLM Wiki indexes them into a local search index so they show up in the app and Claude can read them. Your files stay where they are; nothing is moved or uploaded.
+Windows (PowerShell):
+
+```powershell
+git clone https://github.com/lucasastorian/llmwiki.git
+cd llmwiki
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r api/requirements.txt -r mcp/requirements.txt
+cd web; npm install; cd ..
+```
+
+**2. Point it at a folder of your files** — PDFs, Word documents, PowerPoints, Markdown, notes. Use any folder on your disk (it does **not** go inside this repo): the one that already holds your documents, or a fresh empty one. LLM Wiki indexes it into a local search index so the files show up in the app and Claude can read them. It never moves, modifies, or uploads your files — the only things it adds are a `wiki/` folder for generated pages and a hidden `.llmwiki/` index (see [What happens on disk](#what-happens-on-disk)).
 
 ```bash
-./llmwiki open ~/research
+./llmwiki open ~/research                     # macOS / Linux
+python llmwiki open C:\Users\you\research     # Windows
 ```
 
 This initializes the workspace, indexes the folder, starts the API and web app, and opens [localhost:3000](http://localhost:3000).
@@ -58,7 +72,8 @@ This initializes the workspace, indexes the folder, starts the API and web app, 
 **3. Connect Claude over MCP.** MCP enables Claude to read, write, and search your wiki.
 
 ```bash
-./llmwiki mcp-config ~/research
+./llmwiki mcp-config ~/research                     # macOS / Linux
+python llmwiki mcp-config C:\Users\you\research     # Windows
 ```
 
 Paste the printed JSON into `claude_desktop_config.json` (Claude Desktop) or `.claude/settings.json` (Claude Code). One workspace is one MCP server entry, so add one per folder. Then tell Claude: *"Read the guide, then ingest my sources and start building the wiki."*
