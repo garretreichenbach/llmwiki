@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     S3_BUCKET: str = "supavault-documents"
     MISTRAL_API_KEY: str = ""
     CLOUDFLARE_ACCOUNT_ID: str = ""
-    CLOUDFLARE_AI_TOKEN: str = ""
+    CLOUDFLARE_AUTH_TOKEN: str = ""
     CLOUDFLARE_AI_GATEWAY_ID: str = ""
     QUIZ_GRADE_DAILY_LIMIT: int = Field(default=100, ge=1, le=10_000)
     PDF_BACKEND: str = "opendataloader"  # "opendataloader" or "mistral"

@@ -20,7 +20,7 @@ async def grade_quiz_answer(
     body: GradeQuizAnswer,
     user_id: Annotated[str, Depends(get_user_id)],
 ):
-    if not settings.CLOUDFLARE_ACCOUNT_ID or not settings.CLOUDFLARE_AI_TOKEN:
+    if not settings.CLOUDFLARE_ACCOUNT_ID or not settings.CLOUDFLARE_AUTH_TOKEN:
         raise HTTPException(status_code=501, detail="Quiz grading is not configured")
     await quiz_quota.consume(request.app.state.pool, user_id)
     async with httpx.AsyncClient() as client:

@@ -115,7 +115,7 @@ class QuizGrader:
                 "https://api.cloudflare.com/client/v4/accounts/"
                 f"{settings.CLOUDFLARE_ACCOUNT_ID}/ai/run/{GRADER_MODEL}"
             )
-        headers = {"Authorization": f"Bearer {settings.CLOUDFLARE_AI_TOKEN}"}
+        headers = {"Authorization": f"Bearer {settings.CLOUDFLARE_AUTH_TOKEN}"}
         if gateway_id:
             headers["cf-aig-gateway-id"] = gateway_id
             if user_id:
