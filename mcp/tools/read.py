@@ -27,7 +27,18 @@ _IMG_MIME = {
 _IMAGE_TYPES = {"png", "jpg", "jpeg", "webp", "gif"}
 _PAGE_TYPES = {"pdf", "pptx", "ppt", "docx", "doc", "xlsx", "xls", "csv"}
 _SPREADSHEET_TYPES = {"xlsx", "xls", "csv"}
-_TEXT_TYPES = {"md", "txt", "csv", "html", "svg", "json", "xml"}
+# Source-code extensions — read inline as text, same as prose/data files.
+# Mirrors api/domain/file_types.CODE_TYPES (the mcp service can't import it).
+_CODE_TYPES = {
+    "py", "pyi", "js", "jsx", "ts", "tsx", "mjs", "cjs",
+    "go", "rs", "java", "kt", "kts", "scala", "sc",
+    "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs",
+    "rb", "php", "swift", "dart", "lua", "r", "pl", "pm",
+    "sh", "bash", "zsh", "sql", "css", "scss", "sass", "less", "vue", "svelte",
+    "ex", "exs", "clj", "cljs", "cljc", "erl", "hs", "ml", "mli",
+    "gradle", "groovy", "proto", "graphql", "gql", "toml", "yaml", "yml",
+}
+_TEXT_TYPES = {"md", "txt", "csv", "html", "svg", "json", "xml"} | _CODE_TYPES
 
 
 _CONTROL_CHARS_RE = __import__("re").compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")

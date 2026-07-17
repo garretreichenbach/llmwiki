@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS document_references (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
     source_document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     target_document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    reference_type TEXT NOT NULL CHECK (reference_type IN ('cites', 'links_to')),
+    reference_type TEXT NOT NULL CHECK (reference_type IN ('cites', 'links_to', 'imports')),
     page INTEGER,
     UNIQUE(source_document_id, target_document_id, reference_type)
 );

@@ -162,6 +162,204 @@ def _split_oversized(text: str) -> list[str]:
     return pieces
 
 
+# ── Code-aware chunking ───────────────────────────────────────────────────
+#
+# Prose chunking splits on blank lines and sentence boundaries, which mangles
+# source code. chunk_code splits on *definition* boundaries (functions, classes)
+# so a search hit returns a coherent unit and the breadcrumb names the symbol.
+# It prefers tree-sitter when installed, else falls back to a language-agnostic
+# regex/line-window splitter — local mode stays zero-config.
+
+# ext → tree-sitter language name (for the optional tree-sitter path).
+_TS_LANG_BY_EXT = {
+    "py": "python", "pyi": "python",
+    "js": "javascript", "jsx": "javascript", "mjs": "javascript", "cjs": "javascript",
+    "ts": "typescript", "tsx": "tsx",
+    "go": "go", "rs": "rust", "java": "java",
+    "c": "c", "h": "c", "cc": "cpp", "cpp": "cpp", "cxx": "cpp", "hpp": "cpp", "hh": "cpp",
+    "rb": "ruby", "php": "php", "cs": "csharp", "swift": "swift",
+    "kt": "kotlin", "scala": "scala", "lua": "lua",
+}
+
+# tree-sitter node types that name a top-level definition worth a boundary.
+_TS_DEF_NODE_TYPES = frozenset({
+    "function_definition", "function_declaration", "function_item", "method_definition",
+    "class_definition", "class_declaration", "class_item",
+    "impl_item", "struct_item", "enum_item", "trait_item", "type_item",
+    "interface_declaration", "method_declaration", "constructor_declaration",
+    "type_declaration", "enum_declaration", "struct_specifier", "namespace_definition",
+    "module", "object_declaration", "trait_declaration",
+})
+
+# Fallback: a line that opens a definition in a C-like or scripting language.
+_CODE_DEF_RE = re.compile(
+    r"^(?P<indent>[ \t]*)"
+    r"(?:export\s+)?(?:default\s+)?"
+    r"(?:public\s+|private\s+|protected\s+|internal\s+|static\s+|final\s+|abstract\s+|open\s+|override\s+|pub\s+)*"
+    r"(?:async\s+)?"
+    r"(?P<kw>def|class|function|func|fn|interface|struct|enum|impl|trait|type|namespace|module|object|record)\b"
+    r"[ \t]*(?P<name>[A-Za-z_$][\w$]*)?"
+)
+
+CODE_LINE_WINDOW = 80   # lines per chunk when a file has no detectable defs
+CODE_LINE_OVERLAP = 10
+
+
+def chunk_code(content: str, file_type: str | None = None) -> list[Chunk]:
+    """Chunk source code on definition boundaries, packing small defs together.
+
+    Unlike chunk_text, this never drops short files below MIN_CHUNK_TOKENS — a
+    tiny source file should still be searchable.
+    """
+    if not content or not content.strip():
+        return []
+
+    lines = content.split("\n")
+    boundaries, names = _code_boundaries(content, lines, file_type)
+    chunks = _chunk_by_boundaries(lines, boundaries, names)
+    return _enforce_max_chars(chunks)
+
+
+def _code_boundaries(content: str, lines: list[str], file_type: str | None):
+    """Return (sorted boundary line indices, {line_index: symbol_name})."""
+    ts = _treesitter_boundaries(content, file_type)
+    if ts is not None:
+        return ts
+
+    boundaries: list[int] = []
+    names: dict[int, str] = {}
+    def_indents = []
+    for i, line in enumerate(lines):
+        m = _CODE_DEF_RE.match(line)
+        if m:
+            def_indents.append((i, len(m.group("indent")), m.group("name") or ""))
+    if not def_indents:
+        return [], {}
+    # Only the outermost definitions are chunk boundaries; nested methods stay
+    # inside their enclosing class/function.
+    base_indent = min(ind for _, ind, _ in def_indents)
+    for i, ind, name in def_indents:
+        if ind <= base_indent:
+            boundaries.append(i)
+            names[i] = name
+    return boundaries, names
+
+
+def _treesitter_boundaries(content: str, file_type: str | None):
+    """Boundaries from tree-sitter's top-level definition nodes, or None."""
+    lang = _TS_LANG_BY_EXT.get((file_type or "").lower())
+    if not lang:
+        return None
+    try:
+        from tree_sitter_language_pack import get_parser
+    except Exception:
+        return None
+    try:
+        parser = get_parser(lang)
+        tree = parser.parse(content.encode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+    data = content.encode("utf-8", errors="replace")
+    boundaries: list[int] = []
+    names: dict[int, str] = {}
+    for child in tree.root_node.children:
+        if child.type not in _TS_DEF_NODE_TYPES:
+            continue
+        line_idx = data[: child.start_byte].count(b"\n")
+        boundaries.append(line_idx)
+        name_node = child.child_by_field_name("name")
+        if name_node is not None:
+            names[line_idx] = data[name_node.start_byte:name_node.end_byte].decode(
+                "utf-8", errors="replace"
+            )
+    if not boundaries:
+        return None
+    boundaries = sorted(set(boundaries))
+    return boundaries, names
+
+
+def _chunk_by_boundaries(
+    lines: list[str], boundaries: list[int], names: dict[int, str]
+) -> list[Chunk]:
+    """Build definition units from boundary lines, then pack them into chunks."""
+    # Char offset of each line start (content was split on "\n").
+    offsets = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+
+    if not boundaries:
+        return _line_window_chunks(lines, offsets)
+
+    # Segment starts: a preamble (imports etc.) before the first def, then one
+    # segment per top-level definition.
+    starts = list(boundaries)
+    if starts[0] != 0:
+        starts.insert(0, 0)
+
+    units: list[tuple[str, int, str]] = []  # (text, start_char, symbol_name)
+    for idx, start in enumerate(starts):
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+        text = "\n".join(lines[start:end]).strip("\n")
+        if not text.strip():
+            continue
+        units.append((text, offsets[start], names.get(start, "")))
+
+    chunks: list[Chunk] = []
+    buf: list[str] = []
+    buf_names: list[str] = []
+    buf_tokens = 0
+    buf_start = 0
+
+    def flush():
+        nonlocal buf, buf_names, buf_tokens
+        if not buf:
+            return
+        text = "\n\n".join(buf)
+        distinct = {n for n in buf_names if n}
+        breadcrumb = next(iter(distinct)) if len(distinct) == 1 else ""
+        chunks.append(Chunk(
+            index=len(chunks), content=text, page=None,
+            start_char=buf_start, token_count=_estimate_tokens(text),
+            header_breadcrumb=breadcrumb,
+        ))
+        buf, buf_names, buf_tokens = [], [], 0
+
+    for text, start_char, name in units:
+        t = _estimate_tokens(text)
+        if buf and buf_tokens + t > CHUNK_SIZE:
+            flush()
+        if not buf:
+            buf_start = start_char
+        buf.append(text)
+        buf_names.append(name)
+        buf_tokens += t
+    flush()
+    return chunks
+
+
+def _line_window_chunks(lines: list[str], offsets: list[int]) -> list[Chunk]:
+    """Fixed line-window chunks with overlap, for files with no detectable defs."""
+    chunks: list[Chunk] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        window = lines[i:i + CODE_LINE_WINDOW]
+        text = "\n".join(window).strip("\n")
+        if text.strip():
+            chunks.append(Chunk(
+                index=len(chunks), content=text, page=None,
+                start_char=offsets[i], token_count=_estimate_tokens(text),
+                header_breadcrumb="",
+            ))
+        if i + CODE_LINE_WINDOW >= n:
+            break
+        i += CODE_LINE_WINDOW - CODE_LINE_OVERLAP
+    return chunks
+
+
 def chunk_pages(page_contents: list[tuple[int, str]]) -> list[Chunk]:
     """Chunk multiple pages, preserving page numbers. Each (page_number, content) tuple."""
     all_chunks: list[Chunk] = []

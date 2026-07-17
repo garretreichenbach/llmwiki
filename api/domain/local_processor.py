@@ -18,7 +18,7 @@ import aiosqlite
 from config import settings
 from domain.file_types import (
     EXTRACTION_TYPES, HTML_TYPES, IMAGE_TYPES, OFFICE_TYPES,
-    PDF_TYPES, SIMPLE_TEXT_TYPES, SPREADSHEET_TYPES,
+    PDF_TYPES, SPREADSHEET_TYPES, TEXT_INDEX_TYPES,
 )
 from domain.watcher import mark_written
 from infra.db.sqlite import SQLiteDocumentRepository, create_pool
@@ -109,11 +109,22 @@ async def process_document_isolated(workspace: Path, doc_id: str) -> None:
             await db.close()
 
 
-async def chunk_text_document(db: aiosqlite.Connection, doc_id: str, content: str | None) -> None:
-    """Chunk an already-extracted text document so it becomes full-text searchable."""
-    from services.chunker import chunk_text
+async def chunk_text_document(
+    db: aiosqlite.Connection, doc_id: str, content: str | None, file_type: str | None = None
+) -> None:
+    """Chunk an already-extracted text document so it becomes full-text searchable.
 
-    await _store_chunks(db, doc_id, chunk_text(content or ""))
+    Code files (file_type in CODE_TYPES) are split on definition boundaries;
+    everything else uses the prose/paragraph chunker.
+    """
+    from domain.file_types import CODE_TYPES
+    from services.chunker import chunk_code, chunk_text
+
+    if file_type in CODE_TYPES:
+        chunks = chunk_code(content or "", file_type)
+    else:
+        chunks = chunk_text(content or "")
+    await _store_chunks(db, doc_id, chunks)
     # `parser` doubles as the chunked-marker so reconcile skips docs that
     # legitimately produce zero chunks (empty/short) instead of retrying them.
     await db.execute(
@@ -143,9 +154,9 @@ async def reconcile_workspace(db: aiosqlite.Connection, workspace: Path) -> None
             logger.exception("Reconcile: failed to process %s", doc_id[:8])
 
     text_docs = await _unchunked_text_docs(db)
-    for doc_id, content in text_docs:
+    for doc_id, content, file_type in text_docs:
         try:
-            await chunk_text_document(db, doc_id, content)
+            await chunk_text_document(db, doc_id, content, file_type)
         except Exception:
             logger.exception("Reconcile: failed to chunk %s", doc_id[:8])
 
@@ -428,15 +439,15 @@ async def _unchunked_extractable_ids(db: aiosqlite.Connection) -> list[str]:
     return [r[0] for r in await cursor.fetchall()]
 
 
-async def _unchunked_text_docs(db: aiosqlite.Connection) -> list[tuple[str, str]]:
-    """(id, content) for never-chunked simple-text docs that have content."""
-    placeholders = ",".join("?" for _ in SIMPLE_TEXT_TYPES)
+async def _unchunked_text_docs(db: aiosqlite.Connection) -> list[tuple[str, str, str]]:
+    """(id, content, file_type) for never-chunked text/code docs that have content."""
+    placeholders = ",".join("?" for _ in TEXT_INDEX_TYPES)
     cursor = await db.execute(
-        f"SELECT id, content FROM documents WHERE status NOT IN ('failed', 'processing') AND source_kind != 'asset' "
+        f"SELECT id, content, file_type FROM documents WHERE status NOT IN ('failed', 'processing') AND source_kind != 'asset' "
         f"AND parser IS NULL "
         f"AND file_type IN ({placeholders}) "
         f"AND content IS NOT NULL AND content != '' "
         f"AND id NOT IN (SELECT DISTINCT document_id FROM document_chunks)",
-        tuple(SIMPLE_TEXT_TYPES),
+        tuple(TEXT_INDEX_TYPES),
     )
-    return [(r[0], r[1]) for r in await cursor.fetchall()]
+    return [(r[0], r[1], r[2]) for r in await cursor.fetchall()]

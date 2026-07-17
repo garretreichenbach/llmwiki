@@ -255,6 +255,23 @@ Never write completion state into a page. The app owns progress (the user clicks
 ### Highlights are confusion signals
 Users can highlight passages on any wiki page and attach a note. These surface in the `## Highlights & Annotations` appendix when you `read` the page. On a lesson, treat them as points of confusion: rework the highlighted passage — a clearer explanation, an example, a diagram — rather than just acknowledging the note. Highlights anchor to the exact text, so rewriting a passage clears its marker in the app; an annotation quoting text that no longer exists in the page has already been addressed — don't rework it again.
 
+## Codebases
+
+Some workspaces are **code repositories**, opened with `llmwiki open --code <repo>`. The repo's source files (`.py`, `.ts`, `.go`, …) are ordinary sources: fully searchable and readable with `search` and `read`, just like PDFs or notes. The repo root is the workspace, so paths are repo-relative (`src/pkg/service.py`).
+
+On ingest, a deterministic pass writes two pages under `/wiki/codebase/` and never touches your source files:
+
+- **`codebase/structure.md`** — auto-generated facts: language breakdown, directory tree, entry points, and a Mermaid module-dependency graph. It is **regenerated on every reindex**, so don't hand-edit it — cite it.
+- **`codebase/overview.md`** — a **scaffold with TODOs** that is yours to write. This is the job: turn it into a real architectural overview.
+
+The reference graph also carries **`imports` edges** (source file → source file) built from the code's own import statements — distinct from wiki `cites`/`links_to` edges, and preserved across wiki rebuilds. Use `search(mode="references", path="src/foo.py")` to see what a file imports and what imports it.
+
+### Building a codebase wiki
+1. Read `codebase/structure.md` for the layout and dependency graph, and use `search`/`read` to explore the actual source.
+2. Flesh out `codebase/overview.md`: what the project does, its architecture, and one subsection per top-level module describing its responsibility. **Cite the source files you describe** (footnotes to `src/pkg/service.py` etc.) and link related pages.
+3. Go deeper as warranted: write `/wiki/concepts/` pages for cross-cutting designs (auth flow, data model, request lifecycle) and `/wiki/entities/` pages for the important modules/classes — each citing the code it summarizes.
+4. On later runs, read what changed in the source since last time and fold it into the pages those files touch. The `imports` graph tells you the blast radius of a changed module.
+
 ## Available Knowledge Bases
 
 """

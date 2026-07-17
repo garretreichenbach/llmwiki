@@ -92,7 +92,25 @@ The extension works in both modes. By default it talks to the hosted app; flip t
 | Spreadsheets | `.xlsx` `.xls` | Extracted sheet by sheet. |
 | Web pages | `.html` `.htm` | Cleaned to readable Markdown, stripping nav and ads. |
 | Text & data | `.md` `.txt` `.csv` `.json` `.xml` `.yaml` `.svg`, and more | Indexed and chunked directly. |
+| Code | `.py` `.ts` `.tsx` `.js` `.go` `.rs` `.java` `.rb` `.c` `.cpp` `.sql`, and many more | Indexed and split on definition boundaries so functions and classes stay intact in search. See [Code projects](#code-projects). |
 | Images | `.png` `.jpg` `.webp` `.gif` | Stored and viewable inline; Claude can read them when asked. |
+
+# Code projects
+
+Point LLM Wiki at a source repository and it becomes a searchable, navigable knowledge layer over your code — a place where Claude can read the source, understand how the pieces fit, and maintain a living architectural overview.
+
+```bash
+./llmwiki open --code ~/src/myproject
+```
+
+The repo root becomes the workspace (nothing is copied or moved). LLM Wiki:
+
+- **Indexes your source files** — `.py`, `.ts`, `.go`, `.rs`, and [many more](#supported-files) — split on definition boundaries so a search hit returns a whole function or class, not an arbitrary slice. Build artifacts and vendored dependencies are skipped: it honors your `.gitignore` (and `.llmwikiignore`) and ignores `node_modules/`, `dist/`, `target/`, lockfiles, and minified bundles.
+- **Builds a structure map** at `wiki/codebase/structure.md` — languages, directory tree, entry points, and a Mermaid module-dependency graph. It's regenerated on every reindex, so it always reflects the current code.
+- **Extracts an import graph** — source-file→source-file `imports` edges show up in the [graph viewer](#features) alongside your wiki's cross-references, so you can see how modules depend on each other.
+- **Scaffolds an overview** at `wiki/codebase/overview.md` for Claude to flesh out. The structural facts are generated deterministically (no API key); Claude writes the prose — module summaries, architecture notes, and concept pages — citing the source files it describes.
+
+Then connect over MCP as usual (`./llmwiki mcp-config ~/src/myproject`) and tell Claude: *"Read the guide, then write the codebase overview and a page for each major module."* A nightly [routine](#getting-started) keeps it current as the code changes.
 
 # What happens on disk
 

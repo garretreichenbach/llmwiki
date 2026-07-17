@@ -170,6 +170,7 @@ class SearchHandler:
         if forward:
             cites = [r for r in forward if r["reference_type"] == "cites"]
             links = [r for r in forward if r["reference_type"] == "links_to"]
+            imports = [r for r in forward if r["reference_type"] == "imports"]
             if cites:
                 lines.append(f"**Cites ({len(cites)} sources):**")
                 for r in cites:
@@ -179,14 +180,19 @@ class SearchHandler:
                 lines.append(f"\n**Links to ({len(links)} pages):**")
                 for r in links:
                     lines.append(f"  {r['path']}{r['filename']} ({r.get('title') or r['filename']})")
+            if imports:
+                lines.append(f"\n**Imports ({len(imports)} files):**")
+                for r in imports:
+                    lines.append(f"  {r['path']}{r['filename']}")
         else:
             lines.append("No outgoing references.")
 
         lines.append("")
         if backlinks:
             lines.append(f"**Referenced by ({len(backlinks)} pages):**")
+            _ref_label = {"cites": "cites", "links_to": "links to", "imports": "imports"}
             for r in backlinks:
-                ref = "cites" if r["reference_type"] == "cites" else "links to"
+                ref = _ref_label.get(r["reference_type"], r["reference_type"])
                 lines.append(f"  {r['path']}{r['filename']} ({r.get('title') or r['filename']}) — {ref}")
         else:
             lines.append("No incoming references (backlinks).")

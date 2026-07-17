@@ -20,14 +20,28 @@ from pathlib import Path
 
 import aiosqlite
 
-from domain.file_types import SIMPLE_TEXT_TYPES
+from domain.file_types import TEXT_INDEX_TYPES
 
 logger = logging.getLogger(__name__)
 
 IGNORE_DIRS = frozenset({
     ".llmwiki", ".git", "node_modules", "__pycache__", ".venv", "venv",
     ".idea", ".vscode", ".DS_Store",
+    # Derived build/vendor/cache dirs — never a source of truth.
+    "dist", "build", "target", ".next", "out", "vendor",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".gradle",
+    "coverage", ".terraform", ".nuxt", ".svelte-kit", ".turbo",
 })
+
+# Generated/lock/minified files skipped by name — never chunked. fnmatch-style.
+IGNORE_FILE_PATTERNS = (
+    "*.min.js", "*.min.css", "*.map",
+    "*.lock", "*-lock.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+)
+
+# Above this, index the file row but don't read/chunk its content — keeps giant
+# generated/vendored text files out of the search index.
+MAX_TEXT_CONTENT_BYTES = 1_000_000
 
 COOLDOWN_SECONDS = 2.0
 
@@ -101,6 +115,12 @@ def _should_ignore(path: Path, workspace: Path) -> bool:
         if part in IGNORE_DIRS or part.startswith("."):
             return True
 
+    # Generated/lock/minified files by name
+    from fnmatch import fnmatch
+    name = parts[-1] if parts else ""
+    if any(fnmatch(name, pat) for pat in IGNORE_FILE_PATTERNS):
+        return True
+
     # User-configured ignore patterns
     patterns = _load_ignore_patterns(workspace)
     if patterns and _matches_ignore_pattern(relative_str, patterns):
@@ -134,9 +154,9 @@ async def _index_file(db: aiosqlite.Connection, workspace: Path, file_path: Path
     stem = filename.rsplit(".", 1)[0] if "." in filename else filename
     title = stem.replace("-", " ").replace("_", " ").strip().title()
 
-    # Read content for text files
+    # Read content for text/code files (skip oversized generated blobs).
     content = None
-    if ext in SIMPLE_TEXT_TYPES:
+    if ext in TEXT_INDEX_TYPES and stat.st_size <= MAX_TEXT_CONTENT_BYTES:
         try:
             content = file_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
@@ -170,7 +190,7 @@ async def _index_file(db: aiosqlite.Connection, workspace: Path, file_path: Path
         )
         await db.commit()
         logger.info("Re-indexed (modified): %s", relative)
-        if ext not in SIMPLE_TEXT_TYPES and ext:
+        if ext not in TEXT_INDEX_TYPES and ext:
             await db.execute(
                 "UPDATE documents SET status = 'pending', parser = NULL, error_message = NULL, "
                 "updated_at = datetime('now') WHERE id = ?",
@@ -181,7 +201,7 @@ async def _index_file(db: aiosqlite.Connection, workspace: Path, file_path: Path
             asyncio.create_task(process_document_isolated(workspace, doc_id))
         elif content is not None:
             from domain.local_processor import chunk_text_document
-            await chunk_text_document(db, doc_id, content)
+            await chunk_text_document(db, doc_id, content, ext)
         return
     else:
         # Create new
@@ -212,7 +232,7 @@ async def _index_file(db: aiosqlite.Connection, workspace: Path, file_path: Path
 
     if status == "ready" and content is not None:
         from domain.local_processor import chunk_text_document
-        await chunk_text_document(db, doc_id, content)
+        await chunk_text_document(db, doc_id, content, ext)
 
 
 async def _remove_file(db: aiosqlite.Connection, workspace: Path, file_path: Path) -> None:

@@ -26,6 +26,19 @@ API_DIR = REPO_ROOT / "api"
 MCP_DIR = REPO_ROOT / "mcp"
 WEB_DIR = REPO_ROOT / "web"
 
+# Re-exec under the repo's virtualenv so subprocesses (uvicorn, MCP) inherit it.
+# Without this, running `./llmwiki` uses whatever python the shebang resolves
+# (often system python, which lacks the deps). The venv's python may be a symlink
+# to the system python, so we key off sys.prefix (which venv points at .venv),
+# not the executable path.
+_VENV_DIR = REPO_ROOT / ".venv"
+_VENV_PY = _VENV_DIR / "bin" / "python"
+if _VENV_PY.exists() and Path(sys.prefix).resolve() != _VENV_DIR.resolve():
+    os.execv(str(_VENV_PY), [str(_VENV_PY), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+# Let the CLI reuse shared indexing/analysis code instead of duplicating SQL.
+sys.path.insert(0, str(API_DIR))
+
 
 def _sanitize_name(name: str) -> str:
     slug = name.lower().strip()
@@ -34,7 +47,7 @@ def _sanitize_name(name: str) -> str:
     return slug or "wiki"
 
 
-def cmd_init(workspace: str) -> None:
+def cmd_init(workspace: str, code: bool = False) -> None:
     ws = Path(workspace).resolve()
     ws.mkdir(parents=True, exist_ok=True)
     (ws / "wiki").mkdir(exist_ok=True)
@@ -45,6 +58,8 @@ def cmd_init(workspace: str) -> None:
     if db_path.exists():
         print(f"Workspace already initialized: {ws}")
         print(f"  index.db: {db_path}")
+        if code:
+            _apply_code_mode(ws, db_path)
         return
 
     # Initialize SQLite
@@ -115,14 +130,49 @@ def cmd_init(workspace: str) -> None:
     print(f"  wiki/log.md — created")
     print(f"  .llmwiki/index.db — created")
 
+    if code:
+        _apply_code_mode(ws, db_path)
+
+
+def _apply_code_mode(ws: Path, db_path: Path) -> None:
+    """Mark the workspace as a codebase and generate deterministic structure
+    pages + the import graph. Idempotent — safe to re-run on reindex/open."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE workspace SET kind = 'code'")
+    conn.commit()
+    conn.close()
+
+    try:
+        from services.code_analysis import build_codebase_pages
+    except Exception as e:
+        print(f"  (code structure pass unavailable: {e})", file=sys.stderr)
+        return
+
+    try:
+        result = build_codebase_pages(ws, db_path)
+        print(f"  wiki/codebase/ — {result} (structure + import graph)")
+    except Exception as e:
+        print(f"  Warning: code structure pass failed: {e}", file=sys.stderr)
+
 
 def _index_existing_files(ws: Path, db_path: Path, user_id: str, ws_id: str) -> None:
-    """Index existing files in the workspace into SQLite."""
+    """Index existing files in the workspace into SQLite.
+
+    Honors the same ignore rules as the live watcher (.gitignore /
+    .llmwikiignore, build/vendor dirs, lockfiles) so pointing at a code repo
+    doesn't flood the index with generated artifacts.
+    """
     import hashlib
     import uuid
     import sqlite3
 
-    ignore_dirs = {".llmwiki", ".git", "node_modules", "__pycache__", ".venv", "venv"}
+    # Reuse the watcher's ignore predicate + text/code classification so the
+    # initial index and the live watcher agree on what's a source file.
+    from domain.watcher import _should_ignore, IGNORE_DIRS, MAX_TEXT_CONTENT_BYTES
+    from domain.file_types import TEXT_INDEX_TYPES
+
     indexed = 0
 
     conn = sqlite3.connect(str(db_path))
@@ -132,16 +182,15 @@ def _index_existing_files(ws: Path, db_path: Path, user_id: str, ws_id: str) -> 
     existing = {row[0] for row in cursor.fetchall()}
 
     for root_path, dirs, files in os.walk(ws):
-        # Skip ignored directories
-        dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
+        # Prune ignored directories (built-in + dotdirs); patterns handled per-file.
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
 
         for filename in files:
-            if filename.startswith("."):
+            full = Path(root_path) / filename
+            if _should_ignore(full, ws):
                 continue
 
-            full = Path(root_path) / filename
             relative = str(full.relative_to(ws))
-
             if relative in existing:
                 continue
 
@@ -160,13 +209,9 @@ def _index_existing_files(ws: Path, db_path: Path, user_id: str, ws_id: str) -> 
             stem = filename.rsplit(".", 1)[0] if "." in filename else filename
             title = stem.replace("-", " ").replace("_", " ").strip().title()
 
-            # Keep in sync with domain.file_types.SIMPLE_TEXT_TYPES
+            # Read text/code content inline (skip oversized generated blobs).
             content = None
-            text_types = {
-                "md", "txt", "csv", "svg", "json", "xml",
-                "yaml", "yml", "toml", "ini", "cfg", "rst", "tex", "latex",
-            }
-            if ext in text_types:
+            if ext in TEXT_INDEX_TYPES and stat.st_size <= MAX_TEXT_CONTENT_BYTES:
                 try:
                     content = full.read_text(encoding="utf-8", errors="replace")
                 except Exception:
@@ -273,10 +318,14 @@ def _supervise(api_proc: subprocess.Popen, web_proc: subprocess.Popen, open_brow
                 proc.wait()
 
 
-def cmd_open(workspace: str) -> None:
+def cmd_open(workspace: str, code: bool = False) -> None:
     ws = Path(workspace).resolve()
     if not (ws / ".llmwiki" / "index.db").exists():
-        cmd_init(str(ws))
+        cmd_init(str(ws), code=code)
+    elif code:
+        # Already initialized — (re)apply code mode so `open --code` on an
+        # existing workspace refreshes the structure pages.
+        _apply_code_mode(ws, ws / ".llmwiki" / "index.db")
     cmd_serve(str(ws), open_browser=True)
 
 
@@ -332,15 +381,17 @@ def cmd_reindex(workspace: str) -> None:
     conn.commit()
 
     # Get workspace info
-    cursor = conn.execute("SELECT id, user_id FROM workspace LIMIT 1")
+    cursor = conn.execute("SELECT id, user_id, kind FROM workspace LIMIT 1")
     row = cursor.fetchone()
     if not row:
         print("No workspace found in index.", file=sys.stderr)
         sys.exit(1)
-    ws_id, user_id = row
+    ws_id, user_id, kind = row
     conn.close()
 
     _index_existing_files(ws, db_path, user_id, ws_id)
+    if kind == "code":
+        _apply_code_mode(ws, db_path)
     print(f"✓ Reindexed workspace: {ws}")
 
 
@@ -353,9 +404,15 @@ def main():
 
     p_open = sub.add_parser("open", help="Init if needed + serve + open browser")
     p_open.add_argument("workspace", help="Path to workspace folder")
+    p_open.add_argument("--code", action="store_true",
+                        help="Treat the workspace as a code repo: index source "
+                             "files, build the structure + import graph, scaffold "
+                             "wiki/codebase/")
 
     p_init = sub.add_parser("init", help="Initialize a workspace folder")
     p_init.add_argument("workspace", help="Path to workspace folder")
+    p_init.add_argument("--code", action="store_true",
+                        help="Treat the workspace as a code repo (see `open --code`)")
 
     p_serve = sub.add_parser("serve", help="Start API + web servers")
     p_serve.add_argument("workspace", help="Path to workspace folder")
@@ -377,9 +434,9 @@ def main():
         sys.exit(1)
 
     if args.command == "open":
-        cmd_open(args.workspace)
+        cmd_open(args.workspace, code=args.code)
     elif args.command == "init":
-        cmd_init(args.workspace)
+        cmd_init(args.workspace, code=args.code)
     elif args.command == "serve":
         cmd_serve(args.workspace)
     elif args.command == "mcp":
